@@ -1,0 +1,92 @@
+#!/usr/bin/python3
+import sys
+import pdb
+import math
+import struct
+import pdb
+import os
+import time
+import math
+import re
+import subprocess
+import getopt
+import array
+import scipy.io.wavfile    
+import scipy.io
+import numpy as np
+from notes import *
+import copy
+
+#-----------------------------------------------
+# eanalyze 
+#
+# Reads an estim file and analyzes it's audio characteristics.
+# (UNFINISHED)
+#
+#-----------------------------------------------
+
+
+length=0
+infile=''
+maxint=32768
+
+class Wavefile:
+  def init (self):
+    pass
+
+  def loadWave(self,path):
+    self.samplerate,self.data=scipy.io.wavfile.read(path)
+    length=self.data.shape[0]/self.samplerate
+
+    #debug.write("countx: %d  x %d \n" % (countx,x))
+    #print ("signal: %d startx: %f endx: %f" % (len(self.signal),startx, endx))
+
+    # process command line arguments...
+
+try:
+  opts,args=getopt.getopt(sys.argv[1:],"f:")
+except getopt.GetoptError:
+  print ("eanalyze: unrecognized argument")
+  sys.exit(2)
+for opt,arg in opts:
+  if opt == '-h':
+    print ('eanalyze <args>')
+    print ('     -f  ...specify input audio file')
+  elif opt == '-f':
+    infile=arg
+
+wf=Wavefile()
+wf.loadWave(infile)
+
+count=0
+reportrate=wf.samplerate
+report_ctr=0
+xtot=float(0)
+ytot=float(0)
+ztot=float(0)
+
+print("TIME LEFT  RIGHT TRIPH")
+print("---- ----- ----- -----")
+
+for x,y in wf.data:
+  count+=1
+  report_ctr+=1
+
+  xtot+=float(abs(x))
+  ytot+=float(abs(y))
+  ztot+=abs(float(x)-float(y))
+
+  if (report_ctr>=reportrate):
+    countt=count/float(wf.samplerate)
+    xavg=float(xtot)/reportrate*100./maxint
+    yavg=float(ytot)/reportrate*100./maxint
+    zavg=float(ztot)/reportrate*100./maxint
+    print("%5.1fs %5.1f%% %5.1f%% %5.1f%%" %(float(countt), xavg , yavg, zavg))
+    xtot=0
+    ytot=0
+    ztot=0
+    report_ctr=0
+
+
+sys.exit(0)  
+

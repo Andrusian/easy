@@ -1,0 +1,368 @@
+#!/usr/bin/python3
+#
+#----------------------------------------------------------------
+# erecorder
+# by Andrus
+#
+# This is a fairly simple utility which records the timing of keystrokes.
+# It is for generating .e files to use with 'easy' (with further editing).
+#
+# The idea is you play the video and you tap the keypad along with events.
+# A skeleton .e file is created with the timing. You need to further edit this file
+# at places (mostly) indicated.
+#
+# With some practice - to be fair, maybe quite a bit of practice - it should be possible
+# to quickly produce a perfect stroke stim. I'll admit I'm still practising.
+
+import pdb
+
+from os import environ
+environ['PYGAME_HIDE_SUPPORT_PROMPT'] = '1'
+
+import pygame
+from pygame.locals import *
+import time
+import os.path
+import argparse
+import sys
+
+parser = argparse.ArgumentParser(description='Monitor keystroke for estim timing')
+parser.add_argument('-f', help = "timing basefile name")
+args = parser.parse_args()
+filename=args.f+".e"
+
+if (os.path.exists(filename)):
+    print("file %s already exists. Erase it first." % (filename))
+    sys.exit("exiting...")
+
+print ('''
+
+TYPICAL DEFAULTS
+
+-------------------------------------------
+|  /   /  |          |          |         |                   
+| /   /   |  mark    |  pain    |  vol=0  |                   
+|/   /    |          |          |         |                   
+-------------------------------------------
+|  right  |          |  head    |         |                   
+|  buzz   |  amod    |  buzz    |         |                   
+|         |          |          |         |                   
+---------------------------------  vol up |
+|         |          |          |         |                   
+|  base   | stronger |  head    |         |                   
+| (strong)|          | (strong) |         |                   
+-------------------------------------------
+|         |          |          |         |                   
+|  base   |  strong  |  head    |         |                   
+| (soft)  |          | (soft)   |   head  |                   
+---------------------------------   long  |
+|                    |          |         |                   
+|    quick tap       |  hard    |         |                   
+|                    |    tap   |         |                   
+-------------------------------------------
+  right      both       left
+
+
+''') 
+
+
+
+    
+f=open(args.f+".e","w")
+
+# start the output file with some boiler plate stuff to fill in
+
+f.write('''
+# made with erecorder
+print "title of file: xxx "    # TO DO - FILL ME IN
+output xxx.wav                 # TO DO - FILL ME IN
+#---------------------------------------------
+# Define your base signals
+# These are examples
+#
+# TO DO - at minumum, adjust end times of waves if you want a 
+# simple file. If you make the sounds too long and tap too
+# often you will drive into clipping.
+#
+defsound BASEL form:sine freq:900 vol:.7 fadein:.75 fadeout:0.1 length:442
+defsound BASER form:sine freq:900.1 vol:.7 fadein:.75 fadeout:0.1 length:442
+defsound QTAP form:square freq:600 vol:.2 fadein:.15 length:.25
+defsound HTAP form:square freq:610 vol:.3 fadein:.1 length:.25
+defsound STRONG form:poly vol:.1 fadein:.25 fadeout:.2 length:1.5
+defsound STRONGER form:poly2 vol:.2 fadein:.2 fadeout:.2 langth:3
+
+#---------------------------------------------
+# Define what you want to happen at event times...
+# These are examples.
+#
+
+event0=mix QTAP
+event0R=noop
+eventP=mix HTAP
+eventPR=noop
+
+event7=modify BASER warbtremelo .2
+event7R=modify BASER warbtremelo 0
+event4=modify BASER phase +.4
+event4R=modify BASER phase -.4
+event1=modify BASER phase +.2
+event1R=modify BASER phase -.2 
+
+event8=noop   # to do
+event8R=noop
+event5=mix STRONGER
+event5R=noop
+event2=mix STRONG
+event2R=noop
+
+event9=modify BASEL warbtremelo .2
+event9R=modify BASEL warbtremelo 0
+event6=modify BASEL phase +.4
+event6R=modify BASEL phase -.4
+event3=modify BASEL phase +.2
+event3R=modify BASEL phase -.2
+
+event_ENT=bendphase .5 3
+event_ENTR=noop
+
+event_PLUS=modify BASEL vol 0 ; modify BASER vol 0
+event_PLUSR=noop
+
+event_MINUS=modify BASEL volabs 0 ; modify BASER volabs 0
+event_MINUSR=noop
+
+event0R_2=noop
+event1R_2=noop
+event2R_2=noop
+event3R_2=noop
+event4R_2=noop
+event5R_2=noop
+event6R_2=noop
+event7R_2=noop
+event8R_2=noop
+event9R_2=noop
+
+event02=noop
+event12=noop
+event22=noop
+event32=noop
+event42=noop
+event52=noop
+event62=noop
+event72=noop
+event82=noop
+event92=noop
+
+event_ENT=bendphase .5 3
+event_ENTR=noop
+
+event_PLUS=modify BASEL vol 0 ; modify BASER vol 0
+event_PLUSR=noop
+
+event_MINUS=modify BASEL volabs 0 ; modify BASER volabs 0
+event_MINUSR=noop
+
+#
+#---------------------------------------------
+# Event timings...
+# You can also cut-and-paste these to change the
+# order in which they are laid down into the tracks.
+#
+''')
+
+#------------------------------
+# Graphics stuff... keeping this simple...
+
+def display(str):
+    text = font.render(str, True, (255, 255, 255), (66, 66, 66))
+    textRect = text.get_rect()
+    textRect.centerx = screen.get_rect().centerx
+    textRect.centery = screen.get_rect().centery
+
+    screen.blit(text, textRect)
+    pygame.display.update()
+
+def display2(str,r,g,b):
+    text = font.render(str, True, (255, 255, 255), (r, g, b))
+    textRect = text.get_rect()
+    textRect.centerx = screen.get_rect().centerx
+    textRect.centery = screen.get_rect().centery+40
+
+    screen.blit(text, textRect)
+    pygame.display.update()
+
+def display3(x,y,str,r,g,b):
+    text = font.render(str, True, (255, 255, 255), (r, g, b))
+    textRect = text.get_rect()
+    textRect.centerx = screen.get_rect().x
+    textRect.centery = screen.get_rect().y
+
+    screen.blit(text, textRect)
+    pygame.display.update()
+
+    
+#----------------------------------------
+
+    
+def downevent(key,st,elapsed_st):    # key press
+    display2("event key"+st,190,66,66)
+    key_state=1
+    f.write (("%s " % (elapsed_st))+(command % (st)+"\n"))
+    f.write (("%s " % (elapsed_st))+(command % (st+"2")+"\n"))
+    return
+
+def upevent(key,st,elapsed_st):                   # key release
+    display2("                         ",66,66,66)
+    key_state=0
+    f.write (("%s " % (elapsed_st))+(command % (st)+"\n"))
+    f.write (("%s " % (elapsed_st))+(command % (st+"_2")+"\n"))
+    return
+
+# set up graphics
+
+pygame.init()
+screen = pygame.display.set_mode( (640,480) )
+pygame.display.set_caption('Stroke Recorder')
+screen.fill((66,66,66))
+
+font = pygame.font.Font(None, 24)
+
+start=time.time()
+
+num = 0
+done = False
+key_state = 0    # current key status is none down
+command="$(event%s)"
+
+pygame.key.set_repeat()
+
+
+#wait for first key
+
+while not done:
+  for event in pygame.event.get():
+    display2("HIT A KEY TO RECORD",66,190,66)
+
+    if (event.type==pygame.KEYDOWN):
+       start=time.time()
+       display2("                                          ",66,66,66)
+       done=True
+       
+
+done=False
+
+# main loop
+
+while not done:
+    now=time.time()
+    elapsed=(now-start)
+    
+    elapsed_st="{:.1f}".format(elapsed)
+    display( "     "+elapsed_st+"     " )
+    num += 1
+
+    for event in pygame.event.get():
+      if (event.type==pygame.KEYDOWN):
+        if event.key==K_KP0:
+            downevent(K_KP0,"0",elapsed_st)
+        elif event.key==K_KP1:
+            downevent(K_KP1,"1",elapsed_st)
+        elif event.key==K_KP2:
+            downevent(K_KP2,"2",elapsed_st)
+        elif event.key==K_KP3:
+            downevent(K_KP3,"3",elapsed_st)
+        elif event.key==K_KP4:
+            downevent(K_KP4,"4",elapsed_st)
+        elif event.key==K_KP5:
+            downevent(K_KP5,"5",elapsed_st)
+        elif event.key==K_KP6:
+            downevent(K_KP6,"6",elapsed_st)
+        elif event.key==K_KP7:
+            downevent(K_KP7,"7",elapsed_st)
+        elif event.key==K_KP8:
+            downevent(K_KP8,"8",elapsed_st)
+        elif event.key==K_KP9:
+            downevent(K_KP9,"9",elapsed_st)
+        elif event.key==K_KP_PERIOD:
+            downevent(K_KP_PERIOD,"_P",elapsed_st)
+        elif event.key==K_KP_PLUS:
+            downevent(K_KP_PLUS,"_PLUS",elapsed_st)
+        elif event.key==K_KP_MINUS:
+            downevent(K_KP_MINUS,"_MINUS",elapsed_st)
+        elif event.key==K_KP_MULTIPLY:
+            downevent(K_KP_MULTIPLY,"_MULTIPLY",elapsed_st)
+        elif event.key==K_KP_ENTER:
+            downevent(K_KP_ENTER,"_ENTER",elapsed_st)
+        elif event.key==K_KP_DIVIDE:
+            downevent(K_KP_DIVIDE,"_DIVIDE",elapsed_st)
+          
+        elif event.key==K_ESCAPE:
+          done = True
+          break
+        elif event.key==K_q:
+          done = True
+          break
+
+      elif (event.type==pygame.KEYUP):
+        if event.key==K_KP0:
+            upevent(K_KP0,"0R",elapsed_st)
+        elif event.key==K_KP1:
+            upevent(K_KP1,"1R",elapsed_st)
+        elif event.key==K_KP2:
+            upevent(K_KP2,"2R",elapsed_st)
+        elif event.key==K_KP3:
+            upevent(K_KP3,"3R",elapsed_st)
+        elif event.key==K_KP4:
+            upevent(K_KP4,"4R",elapsed_st)
+        elif event.key==K_KP5:
+            upevent(K_KP5,"5R",elapsed_st)
+        elif event.key==K_KP6:
+            upevent(K_KP6,"6R",elapsed_st)
+        elif event.key==K_KP7:
+            upevent(K_KP7,"7R",elapsed_st)
+        elif event.key==K_KP8:
+            upevent(K_KP8,"8R",elapsed_st)
+        elif event.key==K_KP9:
+            upevent(K_KP9,"9R",elapsed_st)
+        elif event.key==K_KP_PERIOD:
+            upevent(K_KP_PERIOD,"_PR",elapsed_st)
+        elif event.key==K_KP_PLUS:
+            upevent(K_KP_PLUS,"_PLUS",elapsed_st)
+        elif event.key==K_KP_MINUS:
+            upevent(K_KP_MINUS,"_MINUS",elapsed_st)
+        elif event.key==K_KP_MULTIPLY:
+            upevent(K_KP_MULTIPLY,"_MULTIPLY",elapsed_st)
+        elif event.key==K_KP_ENTER:
+            upevent(K_KP_ENTER,"_ENTER",elapsed_st)
+        elif event.key==K_KP_DIVIDE:
+            upevent(K_KP_DIVIDE,"_DIVIDE",elapsed_st)
+
+      time.sleep(.05)
+
+f.write (("length %s" % (elapsed_st)+"\n"))
+
+f.write('''
+#--------------------------------------------------
+# TO DO - do whatever you want here.
+# This just lays down a basic signal in each channel
+# You can add lots of stuff.
+#
+# If you change start point the other time stamps 
+# will have to shift!
+#
+balance left
+0 mix BASEL
+balance right
+0 mix BASER
+
+id3title ""
+id3author ""
+id3comment ""
+
+''')
+      
+f.close()
+
+# end main loop
+
+

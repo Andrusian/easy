@@ -1,0 +1,2137 @@
+#!/usr/bin/python3
+
+#-----------------------------------------------------------------------
+# Easy: Estim Audio SYnthesis
+# by Andrus
+#
+# Reads in a command file in ".e" format and generates an audio file.
+# For more details, please read the instruction manual.
+#
+# GNU Public Licence v3   (2021)
+#-----------------------------------------------------------------------
+# CORE REQUIREMENTS:
+# python3
+# scipy
+# numpy
+#
+# RECOMMENDED:
+# lame encoder  (for converting to mp3)
+# id3v2 (for tagging output files)
+#
+# You can comment out parts of the code if you don't have these.
+
+import sys
+import pdb
+import math
+import wave               # used for output
+import struct
+import pdb
+import os
+import time
+import math
+import re
+import subprocess
+import getopt
+import array
+# used scipy for input: because regular Python one can't
+import scipy.io.wavfile    
+import scipy.io
+import numpy as np
+from notes import *
+import copy
+
+#print (sys.version)
+
+#
+# Globals...
+#
+
+freq = 860                 # use as default
+frate = 44100.0            # framerate as a float
+framerate = int(frate)
+tenswidth = int(.0003/(1/frate))
+maxint = 32767                # max amplitude
+minint = -32768               # min amplitude
+nchannels = 2
+sampwidth = 2
+ct=0.
+et=0.
+id3title="none"
+id3comment="none"
+id3author="none"
+verbose=0
+
+nframes = 0
+comptype = "NONE"
+compname = "not compressed"
+length = 0
+fadestatus=0
+balance=.5
+balanceL=1
+balanceR=1
+outfile=None
+
+waves={}          # a hash of waveforms
+lfos={}           # a hash of Low Frequency Oscilator signals
+macros={}         # hash of multi-line macros
+swaps={}          # hash of short symbol swaps
+
+#--------------------------------------------------
+# A class that provides a simple wrapper around
+# pre-allocated numpy arrays. In theory, this
+# should speed things up instead of using Python lists.
+
+reserve=79380000   # just make it 30 minutes each to start
+
+class Signal:
+  def __init__ (self):
+    self.data=np.zeros(reserve) 
+    self.length=0
+
+  # the code below doesn't seem to work
+  # one option is just to increase the reserve
+  # if the expand routine fails
+
+  def expand (self,count):
+    self.length=count
+    if (self.length>self.data.size):
+      extend=np.zeros(reserve)
+      newarray=np.concatenate(self.data,extend)
+      self.data=newarray
+    
+#--------------------------------------------------    
+
+signal1=Signal()
+signal2=Signal()
+signal=signal1    # a pointer to current signal
+
+ct=0.             # current time position
+base=1000
+f=0
+progress=True
+
+clipping=False  
+swaps['START']="0.0"
+
+
+#==================================================
+# UTILITY FUNCTIONS
+#--------------------------------------------------
+# check frequency range valid for Waves
+# edit: expanded this. low frequencies are
+# useful for modulations
+
+def checkFreq (freq):
+  if (freq<.1):
+     freq=10
+     print ("WARNING: frequency below bounds.")
+  elif (freq>10000):
+     freq=10000
+     print ("WARNING: frequency above bounds.")
+
+  return freq
+
+#--------------------------------------------------
+# check frequency range valid for LFOs
+
+def checkFreqLFO (freq):
+  if (freq<.1):
+     freq=.1
+     print ("WARNING: LFO frequency below bounds.")
+  elif (freq>200):
+     freq=200
+     print ("WARNING: LFO frequency above bounds.")
+
+  return freq
+
+#--------------------------------------------------
+def maxSignal (val):
+  if (val>maxint):
+    clipping=True
+    return maxint
+  elif (val<minint):
+    clipping=True
+    return minint
+  else:
+    return val
+    
+#--------------------------------------------------
+# Error for a non-float.
+#
+def getFloat (line,item,hint):
+  
+  try:
+    retval=float(item)
+  except:
+    print ("ERROR on this line:"+line)
+    print ("This item '"+item+"' needs to be a float.")
+    print ("hint: "+hint)
+    sys.exit(1)
+  return retval
+
+#--------------------------------------------------
+# Error for a non-int.
+#
+def getInt (line,item,hint):
+  
+  try:
+    retval=int(item)
+  except:
+    print ("ERROR on this line:"+line)
+    print ("This item '"+item+"' needs to be a integer.")
+    print ("hint: "+hint)
+    sys.exit(1)
+  return retval
+
+#--------------------------------------------------
+# Convert current time to a position in our data
+
+def timeToPos(when):
+   return int(when*frate)
+
+#--------------------------------------------------
+# Convert current time the position in our data
+# in the audio frame below current position.
+
+def lowerFrame(when):
+   return int(math.floor(float(when))*frate)
+
+#--------------------------------------------------
+# Convert current time the position in our data
+# in the audio frame above current position.
+
+def upperFrame(when):
+   return int(math.ceil(float(when))*frate)
+
+def getTime (mod):
+   return mod.get('time')
+
+#--------------------------------------------------
+# same as allocateFinalSignal but in seconds
+#
+def checkExpandSignal(endtime):
+  global nframes
+  newframes=endtime*frate
+  allocateFinalSignal(newframes)
+  
+#--------------------------------------------------
+# Allocates the space for the output signal.
+# It's better to do this up front if possible.
+
+def allocateFinalSignal(newframes):
+  global nframes
+  
+  if (newframes>nframes):
+    if (progress): print ("STATUS: signal will be %.1fs long.\n" % (newframes/float(frate))) 
+
+    additional=newframes-nframes
+    # allocate LEFT or MONO channel
+
+    if (signal1.length<=newframes):
+      signal1.expand(newframes)
+
+
+    if (signal2.length<=newframes):
+      signal2.expand(newframes) 
+     
+    nframes=int(newframes)
+    swaps['END']=("%.1f"%((signal1.length)/float(frate)))
+
+
+#--------------------------------------------------
+# Translate Note to Freq
+#
+def noteToFreq(input):
+  if input[0]>='A' and input[0]<='G':
+    for note in notetable:
+      nname=note[1]
+      found=nname.find(input)
+      if (found>-1):
+        return float(note[2])
+    return 1000.
+  else:
+    return float(input)
+  
+#--------------------------------------------------
+# Process time range
+#
+# This is used to process time ranges specified at the beginning
+# of lines. It will pull out start and end times and handle
+# relative times. It will also check that the end time is after the
+# start time. If an end time is mandatory, it will generate an error.
+
+def handleTimeRange(input,line,needrange):
+  global ct
+  global et
+  endst=''
+
+  #print("time input: %s" % (input))
+
+  times=input.split('-')
+  if (len(times)==2):
+    startst=times[0]
+    endst=times[1]
+  elif (len(times)==1):
+    startst=times[0]
+    if (needrange==True):
+      print ("ERROR: need time range, 'start-end', on line '%s'" % (line))
+      sys.exit(2)
+  else:
+      print ("ERROR: missing time on line '%s'" % (line))
+      sys.exit(2)
+  # work out start time
+  if (startst[0]=='+'):
+    start=ct+float(startst[1:])
+  else:
+    start=float(startst)
+
+  #work out end time
+  if (endst!=''):
+    if (endst[0]=='+'):
+      end=start+float(endst[1:])
+    else:
+      end=float(endst)
+  else:
+    end=0
+
+  ct=start
+  et=end
+  return(start,end)
+
+#++++++++++++++++++++++++++++++++++++++++++++++++++
+# LFO Class
+#
+# Low Frequency Oscillator class is a simplied
+# version of the wave class with some major differences.
+#
+# LFOs are intended to be applied as Amplitude Modulations
+# over top of the finished signals. Instead of generating
+# the entire waveform, we're just going to generate
+# a single cycle that will repeat as long as needed.
+#
+# LFOs only contain positive values. So, in this way
+# they only affect the volume of the other signal.
+#
+# LFOs values are scaled 0:+1
+#
+# The required frequency range of LFOs is different:
+# - maybe up to 200Hz is the realistic max at fast end
+# - to around 0.1Hz at the slow end
+#
+# LFOs also include volume min/max and duty cycle
+# variations.
+#
+class LFO:
+  def __init__ (self,form,freq,volmin,volmax,duty,genlength):
+    self.form=form
+    freqs=freq.split("-",2)
+    if (len(freqs)==2):
+      self.freq2=checkFreqLFO(float(freqs[1]))  
+      self.freq=checkFreqLFO(float(freqs[0]))
+    else:
+      self.freq2=checkFreqLFO(float(freq))
+      self.freq=checkFreqLFO(float(freq))
+    
+    self.volmin=float(volmin)
+    self.volmax=float(volmax)
+    self.duty=float(duty)
+
+    if (genlength==0):
+      genlength=1./self.freq*2.
+    self.genlength=float(genlength)
+    self.signal=[]
+    self.nframes=int(math.ceil(self.genlength*frate))
+    self.amplitude=(self.volmax-self.volmin)
+    self.sqcount=0
+    self.sqthresh=self.duty*self.nframes
+    self.pos=0
+    
+    # make a blank signal
+
+    for x in range(self.nframes):
+      self.signal.append(0)
+
+
+    for x in range(self.nframes):
+
+      freq=float(x)/self.nframes*(self.freq2-self.freq)+self.freq
+      
+      # depending on form, generate signal different ways
+
+      if (self.form=='sine'):  
+        # minvol does not work with sine
+        # waveform is offset up .5 as range is 0-1
+        self.signal[x]=math.sin(2*math.pi*(self.freq*float(x)/frate))*self.volmax/2+.5
+
+      # square ---------
+      # simple square wave 
+
+      elif (self.form=='square'):
+        if (self.sqcount<self.sqthresh):
+          self.signal[x]=self.volmax
+        else:
+          self.signal[x]=self.volmin
+        self.sqcount+=1
+
+      # sawtooth ---------
+      # sawtooth wave
+
+      elif (self.form=='saw'):
+         t=x/frate
+         cycles=math.modf(t*self.freq)
+         self.signal[x]=(cycles[0]*self.amplitude)+self.volmin
+
+   # print ("Made LFO")
+
+  def reset(self):       # resets the position counter back to start
+    self.pos=0
+    
+  def same(self):        # fetches current value without moving position
+    return self.signal[self.pos]
+
+  def next(self):        # fetches next value in LFO signal
+    self.pos+=1
+    if (self.pos>=self.nframes):
+      self.pos=0
+    return self.signal[self.pos]
+  
+def clamp(n, minn, maxn):
+    return max(min(maxn, n), minn)
+
+#-------------------------------------------------
+# SAMPLE class
+#
+# Reads a .wav file in a usable form.
+# The Python Wave library doesn't have usable
+# documentation on how to read a .wav file so
+# instead we turn to scipy
+
+class Sample:
+  def __init__ (self,path):
+    self.path=path
+    self.signal=[]
+    self.signal2=[]
+  
+  def loadWave(self,start,end):
+
+    self.samplerate,self.data=scipy.io.wavfile.read(self.path)
+    #if self.data.dtype=='int16':
+    #  self.convert=1
+    #elif self.data.dtype=='int32':
+    #  self.convert=65536
+    self.length=self.data.shape[0]/self.samplerate
+    #print ("shape: "+str(self.data.shape))
+
+    self.start=start
+    if (end==-1):
+      self.end=self.length
+    else:
+      self.end=end
+
+    startx=self.start*frate
+    endx=self.end*frate
+    countx=0
+    for x,y in (self.data):
+      if (startx<=countx) and (countx<endx):
+        self.signal.append(x)
+        self.signal2.append(y)
+        #debug.write("countx: %d  x %d \n" % (countx,x))
+      countx+=1
+#    print ("signal: %d startx: %f endx: %f" % (len(self.signal),startx, endx))
+    self.data=None    #an attempt at freeing memory
+
+    #++++++++++++++++++++++++++++++++++++++++++++++++++
+# Wave Class ... note, commands renamed to 'sound'
+#
+# This class does most of the work in creating
+# our wave signals.
+# Waves are positive or nagative values and ranged -32k:+32k
+#
+
+class Wave:
+  def __init__ (self,name,form,freq,vol,fadein,fadeout):
+
+    # freq is a string and might be a range: check this
+    freqs=freq.split("-",2)
+    if (len(freqs)==2):
+      freqs[1]=noteToFreq(freqs[1])
+      freqs[0]=noteToFreq(freqs[0])
+      self.freq2=checkFreq(float(freqs[1]))  
+      self.freq=checkFreq(float(freqs[0]))  
+    else:
+      freq=noteToFreq(freq)
+      self.freq=checkFreq(float(freq))
+      self.freq2=checkFreq(float(freq))
+
+    self.freqcurrent=float(self.freq)
+
+    # same thing with vol, it can slide over the range
+    vols=vol.split("-",2)
+    if (len(vols)==2):
+      self.vol2=float(vols[1])  
+      self.vol=float(vols[0]) 
+    else:
+      self.vol=float(vol)
+      self.vol2=float(vol)
+
+    self.time=0
+    self.form=form
+    self.fadein=float(fadein)
+    self.fadeout=float(fadeout)
+    self.stop=-1
+    self.signal=[]    # most waves
+    self.signal2=[]   # if we've loaded a .wav file
+    self.mods=[]
+    self.stereo=False
+    self.nframes=0
+    self.name=name
+    self.lfofreq=1.
+    self.lfocount=-1
+    self.lfoswing=0
+    self.lfoamp=0
+    self.targetvolpct=0.
+    self.bendamount=0
+    self.bendcounter=0
+    self.bendvolpct=0.
+    self.bendcounter=1
+    self.bendlength=1
+    self.bendphasecounter=0
+    self.bendphaselength=1
+    self.bendphasepct=.25
+    self.vphase_lim=0
+    self.vphase_speed=0  # seconds
+    self.vphase_count=0
+    self.fade=False
+    self.fadevol=0
+    self.fadeamount=0
+    self.fadeinc=0
+    self.fadelength=-1
+    self.rendered=False
+
+  def addSample (self,obj):
+    self.signal=obj.signal
+    self.signal2=obj.signal2
+    self.stereo=True
+    self.nframes=len(obj.signal)        
+    self.stop=(obj.end-obj.start)
+
+  # define the end point of the file
+
+  def stopWave (self,endtime):
+    self.stop=endtime
+
+  # add modification events
+
+  def addmod (self, attime,event,value,value2):
+    self.mods.append({'time':attime,'value':value,'value2':value2,'event':event})
+
+  def start_bendphase(self,length,percent):
+    self.benphasepct=percent
+    self.bendphasecounter=1
+    self.bendphaselength=length
+   
+  def makeWave(self,wchannel):
+    vol=self.vol
+    start=0      # change - always start at zero
+    stop=timeToPos(self.stop)
+    freq=self.freq
+    self.nframes=stop-start
+
+    if (progress):  print ("STATUS: rendering sound '"+self.name+"'")
+
+    if (stop==-1):
+      print ("ERROR: sound %s needs a 'length:' specified" % (self.name))
+      sys.exit(2)
+
+    for x in range(self.nframes): self.signal.append(0)
+
+    # if the fade option is set, an automatic fade-in will be done
+
+    fadeincounter=0
+
+    period=1./freq            # freq has been guarded against divide by zero
+
+    # initialize a couple things for the tens type wave
+
+    lastcycles=-1
+    lastcycles2=-1
+    tenstrigger=1
+    tenscountdown=0
+
+    # fetch modifiers list
+
+    modphase=0      # will not trigger any action
+    mods=self.mods
+
+    #print ("MODS: "+str(len(mods)))
+    if (len(mods)>0):
+      # debugging...
+      #for z in mods:
+      #  debug.write ("MOD %8.4f %s\n" % (z['time'],z['value']))
+
+      mods.sort(key=getTime)
+      nextmod=mods.pop(0)
+    else:
+      nextmod={'time':10000000.,'value':0,'event':'junk'}
+
+    fadeout_starts=self.nframes-timeToPos(self.fadeout)
+    fadein_ends=timeToPos(self.fadein)
+    # print "--- fade in ends:"+str(fadein_ends)
+
+    targetfreq=self.freq
+    targetvol=self.vol
+ 
+    modfreq=False
+    modvol=False
+    voladj=0.
+    waveval=0
+    prev_waveval=.1
+    shif=0     # demanded phase shift in interations
+    phshift=0  # current phase shift
+    x = 0
+
+    #debug.write ("GENERATING SIGNAL-----------\n")
+
+    c=0     # c is counter for sine wave time
+    for x in range(self.nframes):     # x is counter within time span
+
+       # handle the sliding frequency. the way that modify frequencies
+       # is done should be handled gracefully adjusting both ends
+       # of the slide
+
+        freqnext=float(x)/float(self.nframes)*(self.freq2-self.freq)+self.freq
+
+        # and work out sliding volumes. Now, if modify volumes
+        # and sliding volumes are used at the same time it may
+        # not result in what the user expects as modify volumes
+        # are absolute values
+
+        vol=float(x)/self.nframes*(self.vol2-self.vol)+self.vol
+
+        #print "freq: "+str(cfreq)
+
+        now=x/float(frate)  # need the current time where we are writing
+
+        # fadein ----------
+        # if option is active, do a short fade in
+        # on the signal
+
+        if (fadeincounter<fadein_ends):
+          fadeincounter=fadeincounter+1
+          fade1=float(fadeincounter)/float(fadein_ends)
+        else:
+          fade1=1.
+
+        # fadeout ----------
+        # check fadeout time and do that if needed
+
+        if (x>fadeout_starts):
+          fade2=1-(x-fadeout_starts)/float((self.nframes-fadeout_starts))
+        else:
+          fade2=1.
+
+        #--------------
+        # check modifiers
+        #
+        # Some comment is needed here. Modifiers are a bitch.
+        # If you hit the signal with a modifier all at once it
+        # is going to cause a click which definitely can
+        # be perceived because of the Laplace transform
+        # frequency effect.
+        #
+        # Keep in mind each iteration represents 22us (not much
+        # right?). Consider a "phase" change. If we introduce it
+        # over 1000 iterations it calms down the
+        # Laplace response but it is still only
+        # barely at human perception. I've tried to look through
+        # other signal examples but it is very difficult to assess
+        # how quickly to make the transition.
+        #
+        # Frequency shifts are even more difficult and need to be
+        # handled when sine wave at a known point. We use 0 crossing
+        # point +ve to do this.
+        #
+        # Volume jumps are comparatively easy.
+        #
+        # The length of the transitions here is chosen
+        # arbitrarily. See the code below at ***.
+        #
+
+        if (nextmod['time']<now):
+          #debug.write ("Modifier--------%6.3f---" % (nextmod['time']))
+
+                modcmd=nextmod['event']
+                modval=float(nextmod['value'])
+                modval2=nextmod['value2']
+                #                   print ("nextmod at: "+str(nextmod['time'])+" cmd:"+modcmd)
+
+                # these lines set triggers that are executed
+                # and cleared at the next time the wave generation
+                # hits the necessary value
+
+                if (modcmd=="warb"):
+                  self.lfocount=0
+                  self.lfofreq=modval
+
+                elif (modcmd=="warbvibrato"):
+                  self.lfoswing=modval
+
+                elif (modcmd=="warbstop"):
+                  self.lfocount=-1
+
+                elif (modcmd=="warbtremelo"):
+                  self.lfoamp=modval
+
+                # change freq  (relative)
+
+                elif (modcmd=="freq"):
+                  #debug.write("modfreq started\n")
+                   modfreq=True
+                   targetfreq=modval+freq
+
+                # shift phase - normalized
+
+                elif (modcmd=="phase"):
+                  modphase=modval
+                  shif=int(math.floor(modphase*frate/self.freqcurrent))  # how much to shift fwd/back
+                  #debug.write (self.name+": PHASE TRIGGER\n")
+
+                # vol is a quick volime change relative to original base volume
+
+                elif (modcmd=="vol"):
+                  modvol=True
+                  targetvol=modval+vol
+
+                # fade is a slower volume transition up or down
+
+                elif (modcmd=="fade"):
+                  self.fade=True
+                  self.fadevol=modval
+                  self.fadeamount=float(self.fadevol)-self.vol
+                  if (modval2==None):
+                    self.fadelength=int(framerate*1)    # 1 s
+                  else:
+                    self.fadelength=int(framerate*float(modval2))
+                  self.fadeinc=self.fadeamount/self.fadelength
+
+                #  volabs changes to an absolute volume right away
+
+                elif (modcmd=="volabs"):
+                  modvol=True
+                  targetvol=modval
+                
+                # bendvol changes the volume up or down than restores it
+
+                elif (modcmd=="bendvol"): 
+                  self.bendvolpct=modval
+                  self.bendcounter=1
+                  if (modval2==None):
+                    self.bendlength=int(framerate*.5)
+                  else:
+                    self.bendlength=int(framerate*float(modval2))
+                  #print ("bendlength: %d" % (self.bendlength))
+
+                # bendphase alters the phase and then it moves it back after a period of time
+
+                elif (modcmd=="bendphase"):    
+                  self.bendphasepct=modval
+                  self.bendphasecounter=1
+                  if (modval2==None):
+                    self.bendphaselength=int(framerate*.5)
+                  else:
+                    self.bendphaselength=int(framerate*float(modval2))
+
+                # varyphase repeats the bendphase events over and over until turned off
+
+                elif (modcmd=="varyphase"):
+                  if (modval==0):
+                    self.vphase_lim=0
+                    print("zero varyphase %d" % (x))
+                  else:
+                    self.vphase_lim=clamp(modval,-.5,.5)
+                    if (modval2==None):
+                      self.vphase_speed=5
+                    else:
+                      self.vphase_speed=clamp(modval2,.5,10)   # in seconds
+                    self.vphase_count=self.vphase_speed*framerate
+                    print("time %d new vphase length: %d pct %f" % ((x/44100),self.vphase_speed, self.vphase_lim))
+                    self.start_bendphase(int(self.vphase_speed*framerate),self.vphase_lim)
+
+                elif (modcmd=="junk"):
+                   pass
+
+                else:
+                  print ("ERROR - Unrecognized mod event: "+modcmd)
+                try:
+                  nextmod=mods.pop(0) # grab next modifier
+                except IndexError as e:
+                  nextmod={'time':10000000.,'value':0,'event':'junk'}
+
+        # the simplest way to implement varyphase is to implement a bendphase
+        # perioically. this counter block does that
+
+        if (self.vphase_lim!=0):
+          self.vphase_count-=1
+          if (self.vphase_count==0):       # is the timer run down?
+            self.vphase_count=self.vphase_speed*framerate    # restart counter
+            print("time %d reset vphase length: %d pct %f" % ((x/44100),self.vphase_speed, self.vphase_lim))
+
+            self.start_bendphase(self.vphase_speed*framerate,self.vphase_lim)
+
+        # built in lfo
+        #
+        # for convenience, it might be easier to do small frequency mods
+        # while we are building a wave. So, lets just keep a separate
+        # sine wave ready to go.
+
+        if (self.lfocount>=0):
+          biflo1=math.sin(2*math.pi*(self.lfofreq)*(self.lfocount/float(frate)))*self.lfoswing
+          biflo2=math.sin(2*math.pi*(self.lfofreq)*(self.lfocount/float(frate)))*self.lfoamp
+          self.lfocount+=1
+          #debug.write("biflo %d %f %f %f\n" % (self.lfocount, biflo1,biflo1+freq, biflo2))
+
+        else:
+          biflo1=0.
+          biflo2=0.
+
+        # do freq adjustment
+        # I tried several techniques to shift the frequency
+        # gradually.
+
+        if (modfreq):
+          if ((targetfreq-.01)>freq):
+            self.freq=targetfreq
+            self.freq2=targetfreq
+          elif ((targetfreq+.01)<freq):
+            self.freq=targetfreq
+            self.freq2=targetfreq
+          else:
+            modfreq=False      # turn off adjustment
+            #debug.write("modfreq done\n")
+
+        # handle bendvol which can be applied on top of modify vol
+
+        if (self.bendcounter>0):
+          self.bendcounter+=1
+          bendamount=self.bendcounter/float(self.bendlength)*self.bendvolpct
+          if (self.bendcounter>=self.bendlength):
+            self.bendcounter=-self.bendlength
+        elif (self.bendcounter<0):
+          self.bendcounter+=1
+          bendamount=-self.bendcounter/float(self.bendlength)*self.bendvolpct
+          # will end on 0 automatically
+        else:
+          bendamount=0
+
+        # fadevol
+        #
+        # fadevol changes the base volume, doesn't modify it
+        #
+        if (self.fade):
+          if (self.fadelength>=0):
+            self.vol+=self.fadeinc  # may not be the best way due to numerical accuracy
+            targetvol=self.vol
+            self.vol2=self.vol
+
+            if (self.fadelength==0):
+              self.fade=False
+              self.fadelength=-1
+            else:
+              self.fadelength-=1
+
+        else:
+          self.fadeinc=0
+        #print (("time: %6.3f fade: %d fadeinc: %f vol: %4.1f") % (now,self.fade, self.fadeinc, self.vol))
+
+        # modify volume events - handle gradually
+        # sliding volumes should play well with this
+
+        if (modvol):
+          change=targetvol-vol-voladj
+
+          if (change>.001):
+            voladj+=.00022   # achieves .1 vol change in 100ms
+          elif (change<-.001):
+            voladj-=.00022   # achieves .1 vol change in 100ms
+          else:
+            modvol=False 
+            #print("modvol done")
+
+        # handle modphase changes... the gradual calculation below
+        # for handling phase shifts should do most of the work
+
+        if (self.bendphasecounter>0):
+          self.bendphasecounter+=1
+          shif=int(math.floor(self.bendphasepct*frate/self.freqcurrent))   # shift
+          if (self.bendphasecounter>=self.bendphaselength):
+            self.bendphasecounter=-self.bendphaselength
+        elif (self.bendphasecounter<0):
+          self.bendphasecounter+=1
+          shif=int(math.floor(-self.bendphasepct*frate/self.freqcurrent))   # shift back
+          # will end on 0 automatically
+
+        # adjust phase gradually
+
+        if (shif>0):
+          #debug.write(self.name+" shif+ "+str(shif)+" x: "+str(x)+" time: "+str(now)+"\n")
+
+          #print("shif+ "+str(shif)+" x: "+str(x)+" time: "+str(now))
+          if (x%1000==0):   # adjust very slowly
+            phshift+=1
+            shif=shif-1
+        elif (shif<0):
+          #debug.write(self.name+" shif- "+str(shif)+" x: "+str(x)+" time: "+str(now)+"\n")
+          #print("shif- "+str(shif)+" x: "+str(x)+" time: "+str(now))
+          if (x%1000==0):   # adjust very slowly
+            phshift-=1
+            shif=shif+1
+
+        #----------------------------------------
+        # FINALLY! We get to actually generating a signal!
+        #
+        # sine wave fundamentals are handled here
+        # We'll work here in -1:1 and switch to -32768:32767 at the final
+        # step. This is to speed up execution overall. The less we have to
+        # copy and modify the final output signal when writing a .wave file
+        # the better. Because Python is slow.
+
+        # current aggregate volume:
+        vvvvol=(vol+voladj+bendamount)*fade1*fade2*(1+biflo2)
+
+        # current sine wave value:
+        waveval=math.sin(2*math.pi*(self.freqcurrent*float(c+phshift)/frate))
+
+        if ((waveval>=0) and (prev_waveval<0)):              # zero crossing?
+          if ((freqnext+biflo1)!=self.freqcurrent):   # only swap cycles near the zero value
+            self.freqcurrent=freqnext+biflo1
+            # so, next value will be at new freq. we reset
+            # the zero value (to 2, not 0)  here in hopes that the discontinuity
+            # is not very large
+            c=1
+            # and redo the value
+            waveval=math.sin(2*math.pi*(self.freqcurrent*float(c+phshift)/frate))
+        prev_waveval=waveval
+        c+=1
+
+        #debug.write("x:"+str(x)+" targetfreq: %9.2f freq %9.4f freqadj %10.6f\n" % (targetfreq,freq,freqadj))
+
+        #==============================
+        # sin ---------
+        # simple sine wave generation
+
+        if (self.form=='sine'):
+          self.signal[x]=waveval*vvvvol*maxint
+
+          #debug.write(self.name+"%6.3f x:%d y:%6.5f   sine output\n" % (now, x , v))
+
+        elif (self.form=='poly1'):
+          # biflo1 & 2 is intentionally only on primary frequency
+          v=vvvvol*(waveval*.5+\
+            math.sin(2*math.pi*(self.freqcurrent*3.01/2)*((c+phshift)/frate))*.3+\
+            math.sin(2*math.pi*(self.freqcurrent*2.01)*((c+phshift)/frate))*.2)
+          self.signal[x]=v*maxint
+
+        elif (self.form=='poly2'):
+          v=vvvvol*(waveval*.5+\
+                  math.sin(2*math.pi*(self.freqcurrent*3.01/2)*((c+phshift)/frate))*.3+\
+                  math.sin(2*math.pi*(self.freqcurrent*5.01/3)*((c+phshift)/frate))*.2)
+          self.signal[x]=v*maxint
+          #debug.write(self.name+"%6.3f x:%d y:%6.5f   sine output\n" % (now, x , v))
+
+        # comp ---------
+        # this is a "compressed" sine wave with a more
+        # rapid peak. 
+
+        elif (self.form=='comp'):
+          v=waveval
+          self.signal[x]=v*abs(v)*abs(v)*vvvvol*maxint
+
+        # square ---------
+        # simple square wave 
+
+        elif (self.form=='square'):
+          v=waveval
+          if (v>0):
+            self.signal[x]=1*vvvvol*maxint
+          else:
+            self.signal[x]=-1*vvvvol*maxint
+
+        # sawtooth ---------
+        # sawtooth wave
+
+        elif (self.form=='saw'):
+          t=(x+phshift)/frate
+          cycles=math.modf(t*(self.freqcurrent+biflo1))
+          self.signal[x]=(cycles[0]*2-1)*vvvvol*maxint
+
+        # tens ---------
+        # this creates a stream of 30us biphasic pulses
+        # to do: check on scope
+
+        elif (self.form=='tens'):
+          t=(x+phshift)/frate
+          cycles=math.modf(t*(self.freqcurrent+biflo1))
+
+          if (cycles[1]>lastcycles):   # trigger the positive signal
+            lastcycles=cycles[1]
+            tenstrigger=1
+            tenscountdown=tenswidth
+          if ((tenstrigger==1) and (cycles[0]>.5)):  # trigger neg signal
+            tenstrigger=-1
+            tenscountdown=tenswidth
+
+          if (tenscountdown>0):        # do output briefly
+            tenscountdown=tenscountdown-1
+            self.signal[x]=tenstrigger*vvvvol*maxint
+          else:
+            self.signal[x]=0               # wait until next trigger
+      
+
+    self.rendered=True
+        # for debugging signal shape if needed
+        #debug.write("signal %s: %d,%f \n" % (self.name,x,self.signal[x]))
+
+#--------------------------------------------------
+# event - records a modifier event (like a phase change,
+# volume change, frequency change, etc) that
+# will happen during the timeline of the wave
+
+def modifier (line,attime,args):
+   
+  if (not args[0] in waves):
+    print ("sound '"+args[2]+"' is not defined")
+    sys.exit(1)
+
+  name=args[0]
+
+  options=['freq','phase','warb','warbvibrato','warbtremelo','vol','warbstop','bendvol','bendphase','volabs','fade','varyphase']
+  if args[2] not in options:
+    print("ERROR: %s is not a valid sound modifier." % args[2])
+    sys.exit()
+  
+#  print (args)
+  try:
+    amount=float(args[4])
+  except:
+    print("need a valid value for the modify command: '%s'" % line)
+
+  try:
+    amount2=float(args[6])
+  except:
+    amount2=None
+
+  wavespec=waves[name]
+  wavespec.addmod(attime,args[2],amount,amount2)
+  wavespec.signal=[]   # blanks any previous rendering of sound
+  wavespec.signal2=[]
+  wavespec.rendered=False
+       
+#--------------------------------------------------
+# startWave - sets up the basic specifications for a wave.
+# It doesn't actually write anything yet.
+
+def startWave (name,form,freq,vol,fadein,fadeout):
+      # print ("start wave name "+name)
+      newwave=Wave(name,form,freq,vol,fadein,fadeout) 
+      waves[name]=newwave    # add this wave to the list
+    
+#--------------------------------------------------
+# stopWave - records the wave ending time and
+# then calls makeWave to end the wave
+
+def stopWave (name,endtime):
+      # print ("stop wave name "+name)
+      whichwave=waves[name]
+      whichwave.stopWave(endtime)
+
+#--------------------------------------------------
+# Searches for command arguments in standard way
+# If valueSearch is True it looks for an argument
+# otherwise it just looks for the keyword.
+
+def lookFor(args,what,valueSearch,default):
+
+  found=0
+  for arg in args:
+    if (valueSearch):
+      if (arg.find(what+':')>=0):
+        info=arg.split(':',2)
+        if (len(info)==2):
+          return (info[1])
+        else:
+          return None
+    else:
+      if (arg.find(what)>=0):
+        return True
+  return default
+      
+#--------------------------------------------------
+# provides some error diagnosis
+#
+def error_diagnosis (cmd,chst,x,offset,signal,wavespec):
+  print ("Error: occured while trying to write signal")
+  print ("Command: "+cmd)
+  print ("Channel: "+chst)
+  print ("What Frame: "+str(x+offset))
+  print ("Length Channel: "+str(signal1.length))
+  print ("from sound: "+str(wavespec.name))
+  print ("length of sound: "+str(len(wavespec.signal)))
+      
+#--------------------------------------------------
+
+def doBalance (words):
+  global balanceL
+  global balanceR
+  global balance
+
+  if (nchannels==1):
+    print ("ERROR - balance command not useful for 1 channel")
+    sys.exit()
+
+  chtxt=words[2]
+  if (chtxt=="left"):
+    balance=1    # left
+    balanceL=1
+    balanceR=0
+  elif (chtxt=="right"):
+    balance=0    # right
+    balanceR=1
+    balanceL=0
+  elif (chtxt=="both"):
+    balance=.5    # middle
+    balanceL=1
+    balanceR=1
+  elif (chtxt=="centre"):
+    balance=.5    # middle
+    balanceL=1
+    balanceR=1
+  elif (chtxt=="center"):
+    balance=.5    # middle
+    balanceL=1
+    balanceR=1
+  elif (chtxt=="middle"):
+    balance=.5    # middle
+    balanceL=1
+    balanceR=1
+  else:
+    chb=float(chtxt)
+    if (chb>.5):
+      balanceL=1.
+      balanceR=1-(chb-.5)*2
+    if (chb<.5):
+      balanceR=1
+      balanceL=chb*2.
+#--------------------------------------------------
+
+def doCommand (line):
+    global balanceL
+    global balanceR
+    global balance
+    global outfile
+    global ct
+    global exit
+    global signal1
+    global signal2
+    global id3author
+    global id3comment
+    global id3title
+
+    # In this case as well as the next, regex would be reliable in
+    # Perl but is a poorly documented wreck in Python. I've used a C approach
+    # here as it doesn't do weird shit.
+
+    pos=line.find("=")
+    if (pos>-1):
+        sym=line[0:pos]
+        value=line[pos+1:]
+        swaps[sym]=value
+        #print ("sym: "+sym+" = '"+value+"'")
+
+    # do swaps for things that look like this:  $(thing)
+    # yes, this is painful but regex in Python is badly implemented
+    # and is a worse option
+    
+    while True:
+      pos=line.find("$(")
+      if (pos>-1):
+        pos2=line.find(")",pos)
+        if (pos2>-1):
+          sym=line[pos+2:pos2]
+          #print ("pos: "+str(pos)+" pos2: "+str(pos2)+" sym: "+sym+ "from: "+line)
+          if sym in swaps:
+            swap=swaps[sym]
+            #print ("swap: "+sym)
+            newline=line[0:pos]+swap+line[pos2+1:]
+            line=newline
+            #print ("newline: "+line)
+          else:
+            sys.exit("Symbol not found: '"+sym+"'")
+      else:
+        break
+      
+    # does the line look like is starts with a number/time?
+    #print ("Line: %s" % (line))
+    if (re.search("^\s*([+\0-9\.\-]+\s)",line)):
+
+      #subcmd=line.split(" ")
+      #subcmd=re.split("^\s*([\+\.0-9]+\s)",line,2)
+      subcmd=re.split("\s+",line,1)
+      if (subcmd):
+
+          words=re.split("([;\s]+)",subcmd[1])    # split the rest of the line
+          #print ("Time: %s" % (subcmd[0]))
+          #print ("Words: %s" % (words))
+          command=words[0]
+
+          # endwave completes the wave and does the rendering of it
+           
+          if (command=="time"):   #------------------------------------------------- TIME
+            handleTimeRange(subcmd[0],line,0)
+            # I don't think this needs anything more
+            # do nothing... for use with erecorder
+
+          elif (command=="balance"):
+            doBalance(words)
+            # balance with a time in front
+            # time is ignored
+            # why? this is useful for use with erecorder which automatically
+            # puts a time in front of each line. we might want call balance
+            # from erecorder so that a mix command goes only to one channel
+
+          elif (command=="noop"):  #------------------------------------------------- NOOP
+             pass
+
+          #modify adds markers which change the sound wave parameters
+              
+          elif (command=="modify"): # ----------------------------------------------- MODIFY
+            # modify command specifies some modifier event that
+            # will happen during the creation of the wave
+            # modify adds markers which change the sound wave parameters
+            # modify can have multiple commands separated by the ';'
+
+            handleTimeRange(subcmd[0],line,0)
+            modargs=[]
+          
+            wstart=0
+            i=2
+            for word in words[2:]:
+              i+=1
+              if (i==len(words)):
+                modargs.append(word)
+                modifier(line,ct,modargs)
+                modargs=[]
+              elif (word == ";"):
+                modifier(line,ct,modargs)
+                modargs=[]
+              else:
+                modargs.append(word)
+
+          elif (command=="resample"):    #-------------------------------------------- RESAMPLE
+
+            # resample pulls an interesting section of the output signal back into a Wave for
+            # reuse
+            name=words[2]
+            if (progress):  print ("STATUS: resample to '"+name+"'")
+            handleTimeRange(subcmd[0],line,1) 
+            startx=timeToPos(ct)
+            endx=timeToPos(et)
+            fadein=float(lookFor(words,"fadein",True,0.1))
+            fadeout=float(lookFor(words,"fadeout",True,0.1))
+
+            # resample always pulls both channels and creates a stereo Wave
+
+            newwave=Wave(name,"sample","1.","1.",fadein,fadeout)
+            waves[name]=newwave    # add this wave to the list
+            fadeincount=int(fadein*frate)
+            fadeoutcount=int(fadeout*frate)
+
+            count=0
+            for x in range(startx,endx):
+              count+=1
+              if (count<fadeincount):
+                vol=count/float(fadeincount)
+              elif (count>(endx-fadeoutcount)):
+                vol=1.-(count-(endx-fadeoutcount))/float(fadeoutcount)
+              else:
+                vol=1.
+              newwave.signal.append(signal1.data[x]*vol)
+              newwave.signal2.append(signal2.data[x]*vol)
+            newwave.nframes=len(newwave.signal)
+
+          elif (command=="amod"):  # ------------------------------------------------- AMOD
+            # uses an LFO signal to vary volume on an output signal
+            #print (str(ct)+" amod:"+words[2])
+            handleTimeRange(subcmd[0],line,1)
+
+            startx=timeToPos(ct)
+            endx=timeToPos(et)
+            lfo=lfos[words[2]]
+
+            if (progress):  print ("STATUS: applying AMOD '%s' from %d to %d" % (words[2], ct, et))
+
+            if (balanceL>0):     # do left  (and both)
+
+              r=0
+              for w in range(startx,endx):
+                signal1.data[w]=signal1.data[w]*lfo.signal[r]
+                r+=1
+                if (r>=lfo.nframes):               # loop r if we hit end
+                  r=0
+                    
+            if (balanceR>0):     # do right   (and both)
+
+              r=0
+              for w in range(startx,endx):
+                signal2.data[w]=signal2.data[w]*lfo.signal[r]
+                r+=1
+                if (r>=lfo.nframes):               # loop r if we hit end
+                  r=0
+              
+          # mix combines waves in an additive fashion
+              
+          elif (command=="mix"):                           # MIX ----------
+            handleTimeRange(subcmd[0],line,False)
+            endx=et*framerate
+            startx=ct*framerate
+
+            if (endx!=0):
+              countx=endx-startx
+            else:
+              countx=0
+
+            name=words[2]
+            if (progress):  print ("STATUS: mixing sound '"+name+"'")
+
+            strength=float(lookFor(words,"vol",True,1.))
+            lfoname1=str(lookFor(words,"lfobal",True,''))   # works opposite
+            lfoname2=str(lookFor(words,"lfo",True,''))      # works in unison
+
+            if lfoname1 in lfos:
+              lfo=lfos[lfoname1]
+              lfo.reset()
+            else:
+              lfo=None
+                         
+            if lfoname2 in lfos:
+              lfo2=lfos[lfoname2]
+              lfo2.reset()
+            else:
+              lfo2=None
+
+            # if the Wave comes from a Sample, it is stereo! probably...
+            # pick left or right channel
+                         
+            nameparts=name.split(".",2)
+            if (len(nameparts)==2):
+              name=nameparts[0]
+              wchannel=nameparts[1]
+            else:
+              wchannel='left'
+                
+            if not name in waves:
+              print ("sound '"+name+"' is not defined")
+              sys.exit(1)
+            else:
+              # print ("MIX '"+words[2])
+              pass
+
+            wavespec=waves[name]
+            print ("mix "+name+" size "+str(wavespec.stop)+" at "+str(ct))
+
+            if (len(wavespec.signal)==0):
+              wavespec.makeWave('')
+
+            offset=timeToPos(ct)
+            checkExpandSignal(ct+wavespec.stop)
+
+            # choose left or right for the rare stereo Wave
+              
+            if (wchannel == 'left'):
+              fromsignal=wavespec.signal
+            else:
+              fromsignal=wavespec.signal2
+
+            # okay! now lets copy the Wave into the output signals
+
+            count=0
+            try:
+              # do left
+              for x in range(wavespec.nframes):
+                if (lfo!=None):
+                  lfovol=lfo.next()        # forward volume
+                  if (lfovol>1): lfovol=1.
+                  mixval=signal1.data[x+offset]+fromsignal[x]*strength*lfovol
+                elif (lfo2!=None):
+                  lfovol=lfo2.next()        # same both channels
+                  mixval=signal1.data[x+offset]+fromsignal[x]*strength*lfovol*balanceL
+                else:
+                  mixval=signal1.data[x+offset]+fromsignal[x]*strength*balanceL
+
+                signal1.data[x+offset]=mixval
+
+                # check for truncated signal
+                count+=1
+                if (countx!=0) and (count>countx): break
+            except:
+              error_diagnosis(line,"left",x,offset,signal1,wavespec)
+              sys.exit(1)
+
+            # do right
+            count=0
+            try:
+              if (lfo!=None):
+                lfo.reset()
+
+              for x in range(wavespec.nframes):
+                if (lfo!=None):
+                  lfovol=(1-lfo.next())            # inverted volume
+                  if (lfovol>1): lfovol=1
+                  mixval=signal2.data[x+offset]+fromsignal[x]*strength*lfovol
+                elif (lfo2!=None):
+                  lfovol=lfo2.next()        # same both channels
+                  mixval=signal2.data[x+offset]+fromsignal[x]*strength*lfovol*balanceR
+                else:
+                  mixval=signal2.data[x+offset]+fromsignal[x]*strength*balanceR
+
+                signal2.data[x+offset]=mixval
+
+                # check for truncated signal
+                count+=1
+                if (countx!=0) and (count>countx): break
+
+            except:
+              error_diagnosis(line,"right",x,offset,signal2,wavespec)
+
+          # overwrite copies the wave into final output
+          # clearing whatever was there
+              
+          elif (command=="overwrite"):                       # OVERWRITE ----------
+            handleTimeRange(subcmd[0],line,False)
+            endx=et*framerate
+            startx=ct*framerate
+
+            if (endx!=0):
+              countx=endx-startx
+            else:
+              countx=0
+
+            name=words[2]
+            if (not words[2] in waves):
+              print ("sound '"+words[2]+"' is not defined")
+              sys.exit(1)
+                 
+            wavespec=waves[name]
+
+            if (len(wavespec.signal)==0):
+              wavespec.makeWave('')
+
+            offset=timeToPos(ct)
+            checkExpandSignal(ct+wavespec.stop)
+
+            # do left
+              
+            if (balanceL>=.5):
+              balval=1
+              
+              count=0
+              for x in range(wavespec.nframes):
+                mixval=wavespec.signal[x]*balval
+                signal1.data[x+offset]=mixval
+                # check for truncated signal
+                count+=1
+                if (countx!=0) and (count>countx): break
+
+              # do right
+              
+            if (balanceR>=.5):
+              balval=1
+            
+              count=0
+              for x in range(wavespec.nframes):
+                if (wavespec.stereo):
+                  mixval=wavespec.signal2[x]*balval     # for a stereo sample
+                else:
+                  mixval=wavespec.signal[x]*balval      # for a mono source Wave
+                signal2.data[x+offset]=mixval
+                # check for truncated signal
+                count+=1
+                if (countx!=0) and (count>countx): break                 
+                 
+          elif (command=="amplify"):                       # AMPLIFY ----------
+            handleTimeRange(subcmd[0],line,1)
+            #print ("words:"+str(words))
+            volrange=words[2]
+            info=volrange.split("-")
+            # print ("info:"+str(info))
+            if (len(info)>=2):
+              vol1=getFloat(line,info[0]," Needs to be starting volume.")
+              vol2=getFloat(line,info[1]," Needs to be ending volume.")
+            else:
+              vol1=getFloat(line,info[0]," Needs to be a volume.")
+              vol2=getFloat(line,info[0]," Needs to be a volume.")
+             
+            startx=timeToPos(ct)
+            endx=timeToPos(et)
+
+            # do left
+            # overwrite can drive both channels equally but it is a bit peculiar
+            # .5 is both channels full strength
+              
+            if (balanceL>0):
+              for x in range(startx,endx):
+                amp=(float(x)-startx)/(endx-startx)*(vol2-vol1)+vol1
+                mixval=signal1.data[x]*amp
+                signal1.data[x]=mixval
+                 
+             # do right
+              
+            if (balanceR>0):
+              for x in range(startx,endx):
+                amp=(x-startx)/(endx-startx)*(vol2-vol1)+vol1
+                mixval=signal2.data[x]*amp
+                signal2.data[x]=mixval
+
+          
+          elif (command=="softclip"):                       # SOFTCLIP ----------
+            handleTimeRange(subcmd[0],line,1)
+
+            strength=float(lookFor(words,"strength",True,1.5))
+            voladj=float(lookFor(words,"voladj",True,1.4))
+            startx=timeToPos(ct)
+            endx=timeToPos(et)
+
+            # tested the formula here using excel. increasing
+            # strength will distort the signal more. Some loss
+            # of volume will occur so voladj will compensate, however,
+            # too large voladj will drive back towards hard clipping
+            #
+            # Have to normalize signal down to +1:-1 then scale back to maxint
+              
+            if (progress):  print ("STATUS: doing softclipping at "+str(ct))
+
+            if (balanceL>0):
+              for x in range(startx,endx):
+                val=2/math.pi*math.atan(strength*signal1.data[x]/maxint)*voladj
+ #               debug.write("L clip before: %.4f  after %.4f \n" % (signal1.data[x],val))
+                signal1.data[x]=int(val*maxint)
+                 
+            # do right
+              
+            if (balanceR>0):
+              for x in range(startx,endx):
+                val=2/math.pi*math.atan(strength*signal2.data[x]/maxint)*voladj
+#                debug.write("R clip before: %.4f  after %.4f \n" % (signal2.data[x],val))
+                signal2.data[x]=int(val*maxint)
+
+                 
+          elif (command=="compress"):                       # COMPRESS ----------
+            handleTimeRange(subcmd[0],line,1)
+
+            target=float(lookFor(words,"target",True,.95))
+            strength=float(lookFor(words,"strength",True,.2))
+            startx=timeToPos(ct)
+            endx=timeToPos(et)
+            if (progress):  print ("STATUS: doing compression at "+str(ct))
+
+            # target should be something like .9 (90% vol)
+            # strength should be something like .25, meaning the signal can be
+            #    increased by up to 25% proportionally of the difference
+            # need to normalize signal and scale back up for this command too
+
+             
+            if (progress):  print ("STATUS: doing compression at "+str(ct))
+
+            if (balanceL>0):
+              for x in range(startx,endx):
+                val=float(signal1.data[x])/maxint
+                if (val>=0.):
+                  if (target>val):
+                    newval=(target-val)*strength+val
+                  else:
+                    newval=val
+                else: 
+                  if (-target<val):
+                    newval=(-target-val)*strength+val
+                  else:
+                    newval=val
+                if (newval>.99): newval=.99
+                signal1.data[x]=int(newval*maxint)
+                 
+             # do right
+              
+            if (balanceR>0):
+              for x in range(startx,endx):
+                val=float(signal2.data[x])/maxint
+                if (val>=0.):
+                  if (target>val):
+                    newval=(target-val)*strength+val
+                  else:
+                    newval=val
+                else: 
+                  if (-target<val):
+                    newval=(-target-val)*strength+val
+                  else:
+                    newval=val
+                if (newval>.99): newval=.99
+                signal2.data[x]=int(newval*maxint)
+
+                
+          elif (command=="echo"):                       # ---------------------ECHO
+            if (progress):  print ("STATUS: echo at "+str(ct))
+            handleTimeRange(subcmd[0],line,1)
+            startx=timeToPos(ct)
+            endx=timeToPos(et)
+
+            lvol=float(lookFor(words,"lvol",True,0.))
+            rvol=float(lookFor(words,"rvol",True,0.))
+            echo=float(lookFor(words,"delay",True,0.2))
+
+            # echo affects both channels
+            delayx=int(echo*frate)
+
+            if (endx>=len(signal1.data)):
+              endx=len(signal1.data)-1
+             
+            for x in range(int(startx),int(endx)):
+              if (x+delayx)<len(signal1.data):
+                newval=signal1.data[x+delayx]+signal1.data[x]*lvol
+                if (newval>maxint): newval=maxint
+                signal1.data[x+delayx]=int(newval)
+                newval=signal2.data[x+delayx]+signal2.data[x]*rvol
+                if (newval>maxint): newval=maxint
+                signal2.data[x+delayx]=int(newval)
+
+          # so pitch turns out to be harder than expected.
+          # this is a simple method but tricky. To raise pitch
+          # we simply drop samples. To lower pitch, we repeat
+          # samples.
+          #
+          # It only works with a very limited range of changes
+          # and to do it we need to make a copy of the original
+          # samples otherwise the algorithm breaks down as we
+          # are overwriting them. The whole thing turned out
+          # to be more work than I was expecting.
+
+          elif (command=="pitch"):   #--------------------------------------------PITCH
+             handleTimeRange(subcmd[0],line,1)                       
+             if (progress):  print ("STATUS: doing pitch change at "+str(ct))
+
+             startx=timeToPos(ct)
+             endx=timeToPos(et)
+
+             inputrange=lookFor(words,"change",True,"1.-2.")
+             pitches=inputrange.split('-')
+             if (len(pitches)==2):
+               pitch2=float(pitches[1])  
+               pitch1=float(pitches[0])
+             else:
+               pitch2=float(pitches[0])
+               pitch1=float(pitches[0])
+
+             if (endx>=len(signal1.data)):
+               endx=len(signal1.data)-1
+
+             distance=endx-startx
+
+             # do left...
+             if (balanceL>0):
+               drop=0
+               add=0
+               count=0
+               spot=startx
+  #             debug.write("Pitch change from %d to %d\n" % (startx, endx))
+               orig=copy.deepcopy(signal1.data[startx:endx])   # copy this part of signal otherwise lowering pitch doesn't work
+               for ox in range(0,distance):
+                 count+=1
+                 val=orig[ox]
+                 pitchcurrent=float(ox)/float(distance)*(pitch2-pitch1)+pitch1
+                 if (pitchcurrent>1.):
+                  drop=int(1./(pitchcurrent-1.))
+                  add=0
+                 elif (pitchcurrent<1.):
+                  add=int(1//(1.-pitchcurrent))
+                  drop=0
+                 else:
+                   pass
+                 if ((drop!=0) and (count%drop==0)):
+                   count=0
+  #                 debug.write("PCDROP count %d pitch %5.1f add %d drop %d x %d -> spot %d value %d\n" % (count, pitchcurrent, add, drop, ox,spot, val))
+                   continue   # skip writing this pass
+                 if ((add!=0) and (count%add==0)):
+                   count=0
+                   signal1.data[spot]=val  # write extra
+  #                 debug.write("PCADD count %d pitch %5.1f add %d drop %d x %d -> spot %d extraval %d\n" % (count, pitchcurrent, add, drop, ox,spot,val))
+                   spot+=1
+
+                 signal1.data[spot]=val  # write regular
+  #               debug.write("PC count %d pitch %5.1f add %d drop %d x %d -> spot %d value %d\n" % (count, pitchcurrent, add, drop, ox,spot,val))
+                 spot+=1                             #advance write spot
+                 if (spot>endx): break
+
+             # do right...  
+             if (balanceR>0):
+               drop=0
+               add=0
+               count=0
+               spot=startx
+   #            debug.write("Pitch change from %d to %d\n" % (startx, endx))
+               orig=copy.deepcopy(signal2.data[startx:endx])   # copy this part of signal otherwise lowering pitch doesn't work
+               for ox in range(0,distance):
+                 count+=1
+                 val=orig[ox]
+                 pitchcurrent=float(ox)/float(distance)*(pitch2-pitch1)+pitch1
+                 if (pitchcurrent>1.):
+                  drop=int(1./(pitchcurrent-1.))
+                  add=0
+                 elif (pitchcurrent<1.):
+                  add=int(1//(1.-pitchcurrent))
+                  drop=0
+                 else:
+                   pass
+                 if ((drop!=0) and (count%drop==0)):
+                   count=0
+  #                 debug.write("PCDROP count %d pitch %5.1f add %d drop %d x %d -> spot %d value %d\n" % (count, pitchcurrent, add, drop, ox,spot, val))
+                   continue   # skip writing this pass
+                 if ((add!=0) and (count%add==0)):
+                   count=0
+                   signal2.data[spot]=val  # write extra
+  #                 debug.write("PCADD count %d pitch %5.1f add %d drop %d x %d -> spot %d extraval %d\n" % (count, pitchcurrent, add, drop, ox,spot,val))
+                   spot+=1
+
+                 signal2.data[spot]=val  # write regular
+  #               debug.write("PC count %d pitch %5.1f add %d drop %d x %d -> spot %d value %d\n" % (count, pitchcurrent, add, drop, ox,spot,val))
+                 spot+=1                             #advance write spot
+                 if (spot>endx): break
+
+
+          # silence overwrites a portion of the final output
+              
+          elif (command=="silence"):                           # SILENCE ----------
+            handleTimeRange(subcmd[0],line,1)
+            offset=timeToPos(ct)
+            startx=int(ct*frate)
+            endx=int(et*frate)
+
+            if (balanceL>0):
+              for x in range(startx,endx):
+                signal1.data[x]=0
+            # do right only if panned that way
+            if (balanceR>0):
+              for x in range(startx,endx):
+                signal2.data[x]=0
+
+          # modulate multiplies when combining sound waves
+          elif (command=="notch"):                           # NOTCH ----------
+            handleTimeRange(subcmd[0],line,0)
+            offset=timeToPos(ct)
+            if len(words)>1:
+              width=float(words[2])
+            else:
+              width=.01        # 10ms default
+
+            count=int(frate*width/2.)
+            startx=offset-count
+            if (startx<0): startx=0
+            if (startx+count+count)<len(signal1.data):
+              #fade out..
+
+              if (balanceL>0):
+                count2=0.
+                for x in range(startx,offset):
+                  signal1.data[x]=signal1.data[x]*(1.-count2/count)
+                  count2+=1
+              # do right only if panned that way
+              if (balanceR>0):
+                count2=0.
+                for x in range(startx,offset):
+                  signal2.data[x]=signal2.data[x]*(1.-count2/count)
+                  count2+=1
+
+              #fade in..
+              endx=offset+count
+
+              if (balanceL>0):
+                count2=0.
+                for x in range(offset,endx):
+                  signal1.data[x]=signal1.data[x]*count2/count
+                  count2+=1
+              # do right only if panned that way
+              if (balanceR>0):
+                count2=0.
+                for x in range(offset,endx):
+                  signal2.data[x]=signal2.data[x]*count2/count
+                  count2+=1
+            else:
+               print("ERROR: notch out of bounds, skipping")
+
+          # modulate multiplies when combining sound waves
+
+          elif (command=="modulate"):                          # MODULATE ----------
+            name=words[2]
+            handleTimeRange(subcmd[0],line,0)
+            # TODO: handle end time as a time limit
+            if (progress):  print ("STATUS: modulating with wave '"+name+"'")
+
+            if (not words[2] in waves):
+              print ("sound '"+words[2]+"' is not defined")
+              sys.exit(1)
+
+            if (len(words)<=5):
+              strength=1.
+            else:
+              if (words[3]==""):
+                strength=1.
+              else:
+                strength=float(words[6])
+            wavespec=waves[name]
+
+            if (len(wavespec.signal)==0):
+              wavespec.makeWave('')
+                
+#             print ("mix "+name+" size "+str(wavespec.time)+" to "+str(wavespec.stop)+" at "+str(ct))
+
+            offset=timeToPos(ct)
+            checkExpandSignal(ct+wavespec.stop)
+
+            # left
+            # do left only if panned that way =, modulate applies to both channels
+            # only if exactly in the middle. because we've changed from -1:1 to -32k:+32k
+            # we also have to divide out a 32k here
+              
+            if (balanceL>0):
+              for x in range(wavespec.nframes):
+                signal1.data[x+offset]=int(signal1.data[x+offset]*wavespec.signal[x]*strength/maxint)
+              # right
+              # do right only if panned that way
+            if (balanceR>0):
+              for x in range(wavespec.nframes):
+                signal2.data[x+offset]=int(signal2.data[x+offset]*wavespec.signal[x]*strength/maxint)
+          else:
+#           print ("don't recognize command: "+line+" at "+str(count))
+            pass
+    else:
+
+      # these are commands that are not preceded by times, these are:
+      #
+      # defwave
+      # deflfo
+      # silence
+      # define
+      # macro
+      # repeat
+      # defwave
+      # deflfo
+      # length
+
+      words=re.split("([\s]+)",line)    # split the rest of the line
+      command=words[0]
+
+      # print comment from input file
+       
+      if (command=="print"):
+          m=re.search('\"(.*?)\"',line)
+          if m:
+            print (m.group(1))
+
+      elif (command=="defsound"):
+         name=words[2]
+         ct=0                    # defining a wave resets the time w.r.t. wave to zero
+         form=str(lookFor(words,"form",True,"sine"))   
+         freq=str(lookFor(words,"freq",True,str(base)))   # could be start-end
+         vol=str(lookFor(words,"vol",True,str(.5)))       # could be start-end
+         fadein=float(lookFor(words,"fadein",True,.01))
+         fadeout=float(lookFor(words,"fadeout",True,.01))
+         wavelength=float(lookFor(words,"length",True,0))   #okay, poorly named variable
+
+         startWave(name,form,freq,vol,fadein,fadeout)
+         if (wavelength>0):
+           stopWave(name,wavelength)
+
+      elif (command=="deflfo"):
+         name=words[2]
+         form=str(lookFor(words,"form",True,"square"))  
+         freq=str(lookFor(words,"freq",True,5.))
+         duty=float(lookFor(words,"duty",True,.5))   
+         volmin=float(lookFor(words,"minvol",True,1.))   
+         volmax=float(lookFor(words,"maxvol",True,1.))   
+         length=float(lookFor(words,"length",True,0))     # default is one wavelength
+         lfos[name]=LFO(form,freq,volmin,volmax,duty,length)
+
+      # specify output channel 1 or 2 or both
+      # I've changed how balance works here because
+      # it was confusing. As a result, I keep balance amount on L and R separately.
+      # this gives full volume at centre balance position with falloffs
+      # to zero at each extreme
+       
+      elif (command=="balance"):
+        doBalance(words)
+
+      # specify output channel 1 or 2 or both
+       
+      elif (command=="noop"):
+         pass
+
+      # override output file name
+      # in this way, output names can be set by the instruction files that
+      # make them
+      
+      elif (command=="output"):
+          outfile=words[2]
+
+      elif (command=="id3title"):
+        m=re.search('\"(.*?)\"',line)
+        if m:
+          id3title=m.group(1)
+      elif (command=="id3comment"):
+        m=re.search('\"(.*?)\"',line)
+        if m:
+          id3comment=m.group(1)
+      elif (command=="id3author"):
+        m=re.search('\"(.*?)\"',line)
+        if m:
+          id3author=m.group(1)
+
+      elif (command=="repeat"):
+         howmany=int(words[2])
+         for j in range(howmany):
+            command="".join(words[4:])   # the rest of the line becomes the command
+            print ("Repeat "+str(j)+" "+command)
+            
+            doCommand(command)
+
+      # end defines the length of the audio file
+
+      elif (command=="length"):
+         # length command sets the overall length of the file
+         # allocating enough memory to store it
+
+         nframes=upperFrame(float(words[2]))
+         #print("nframes: "+str(nframes)+" for time "+words[2])
+
+         allocateFinalSignal(nframes)
+
+      # 'define' defines a macro which can be reused later
+
+      elif (command=="define"):
+          dname=words[2]
+          macro=""
+          line=f.readline()
+
+          while line:
+            if (line.find("enddefine")>-1):
+              break
+            else:
+#              print ("line:"+line)
+              macro=macro+line
+              macros[dname]=macro
+              line=f.readline()
+
+
+      # 'define' defines a macro which can be reused later
+
+      elif (command=="macro"):
+         dname=words[2]
+         if dname in macros:
+           macrocontent=macros[dname]
+           lines=macrocontent.splitlines()
+           for line in lines:
+             print ("macro: "+line)
+             doCommand(line)
+
+         else:
+           print ("macro not found: "+dname)    
+
+      # 'include' reads the commands from another file
+
+      elif (command=="include"):
+         iname=words[2]
+         
+         try:
+           inc=open(iname,"r")
+         except:
+           print ("Could not open include file '%s' \n" % (infile))
+           sys.exit(1)
+
+         for line in inc:
+           lines=line.splitlines()
+           for line2 in lines:
+             doCommand(line2)
+         inc.close()
+         
+      elif (command=="load"):
+         ct=0                # defining a wave resets the time w.r.t. wave to zero
+         name=str(words[2])
+         filename=str(words[4])
+         newwave=Wave(name,"sample","1.","1.",0.,0.) 
+         waves[name]=newwave    # add this wave to the list
+
+         st=float(lookFor(words,"start",True,0.))
+         en=float(lookFor(words,"end",True,-1.))
+         sample=Sample(filename)
+         sample.loadWave(st,en)
+         newwave.addSample(sample)
+
+         # blank lines and uncrecognized commands fall through here
+    return
+
+
+#============================================================
+nchannels=2
+domp3=1
+
+try:
+  opts,args=getopt.getopt(sys.argv[1:],"vhf:")
+except getopt.GetoptError:
+  print ("easy: unrecognized argument")
+  sys.exit(2)
+for opt,arg in opts:
+  if opt == '-h':
+    print ('easy <args>')
+    print ('     -f  ...specify input command file (.e file)')
+    print ('     -v  ...verbose')
+  elif opt == '-v':
+    verbose=1
+  elif opt == '-f':
+    infile=arg 
+
+
+
+# debug=open("___debug.txt","w+") # open the debug file
+
+# read through the timing file
+
+try:
+  f=open(infile,"r")
+except:
+  print ("Could not open command file")
+  sys.exit(1)
+
+# 1st pass through the command file looking for the
+# length command
+
+line=f.readline()
+while line:
+  line=line.splitlines()
+  line=line[0].split(' ')
+  match=line[0].find("length")
+  if (match>-1):
+    #print (line)
+    tlength=float(line[1])
+    allocateFinalSignal(upperFrame(tlength))
+  line=f.readline()
+
+  
+f.seek (0)
+
+# 2nd pass through the command file processing
+# all commands
+
+count=0
+line=f.readline()
+dontread=0
+while line:
+
+  count=count+1
+
+  # remove the carriage return
+
+  line=line.splitlines()
+
+  if (verbose):
+    print ("LINE "+str(count)+" '"+line[0]+"'")
+
+  # remove everything after a # as a comment
+
+  line=line[0].split('#')
+  doCommand(line[0])
+
+  if (not dontread):     # skip if we just read a macro or processing one
+    line=f.readline()    # pull in the next line and loop
+    dontread=0
+
+  # done with the command file
+
+f.close()
+
+#---------------
+# finally, write the wav file out
+
+if (outfile is None):
+  print ("No output file was specified")
+  sys.exit(1)
+
+""" try:
+  wav_file = wave.open(outfile, "w")
+except wave.Error:
+  print ("Could not open output '"+outfile+"'")
+  sys.exit(1)
+except:
+  print ("Sorry, something went wrong.")
+  sys.exit(1)
+   """
+count=0
+  
+if (progress):  print ("STATUS: writing final signal: length %5.1fs" % (nframes/frate))
+
+# Originally wrote this with the standard python library but
+# switched it over to scipy for more speed. Python is slow.
+
+
+osignal1=np.asarray(signal1.data[:nframes],dtype=np.int16)
+osignal2=np.asarray(signal2.data[:nframes],dtype=np.int16)
+
+if (nchannels==1):
+  scipy.io.wavfile.write(outfile,framerate,osignal1)
+else:
+  combined_signal = np.vstack((osignal1, osignal2)).T
+  scipy.io.wavfile.write(outfile,framerate,combined_signal)
+
+
+""" if (nchannels==1):
+  wav_file.setparams((nchannels, sampwidth, framerate, nframes ,comptype, compname))
+  for x in range(nframes):
+    wav_file.writeframes(struct.pack('h', int(maxSignal(signal1.data[x]*maxint))))
+else:
+  wav_file.setparams((nchannels, sampwidth, framerate, nframes ,comptype, compname))
+  for x in range(nframes):
+    count=count+1
+    if (count%441000==0):
+      if (progress):  print ("STATUS: at : %4.0f/%4.0fs" % (count/float(frate),nframes/float(frate)))
+      
+    wav_file.writeframes(struct.pack('h', int(maxSignal(signal1.data[x]*maxint))))
+    wav_file.writeframes(struct.pack('h', int(maxSignal(signal2.data[x]*maxint)))) """
+
+
+# making mp3 ------------------------------
+# 
+# this is set up for Ubuntu 20.04. You'll need lame and id3v2 
+# installed.
+# 
+# Look, if you are on some
+# other platform (e.g. Windows) then change these 
+# commands to whatever command-utility can do ID3 tags.
+# In theory, lame can do ID3 tags itself but it throws odd errors.
+
+
+cmd = '/usr/bin/id3v2 --song "%s" --artist "%s" --comment "%s" %s ' % (id3title,id3author,id3comment,outfile) # tag .wav
+print (cmd)
+subprocess.call(cmd, shell=True)
+
+if (domp3):
+  mp3file=outfile[0:(len(outfile)-3)]+"mp3"
+  cmd = '/usr/bin/lame --preset standard %s ' % (outfile)   # make mp3
+  print (cmd)
+  subprocess.call(cmd, shell=True)
+
+  cmd = '/usr/bin/id3v2 --song "%s" --artist "%s" --comment "%s" %s ' % (id3title,id3author,id3comment,mp3file) # tag .mp3
+  print (cmd)
+  subprocess.call(cmd, shell=True)
+
+
+if clipping:
+  print("FYI: clipping occured.")
+
+print ("output file is complete: "+outfile)
+
+#debug.close()
+
