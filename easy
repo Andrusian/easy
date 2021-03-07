@@ -322,23 +322,29 @@ def handleTimeRange(input,line,needrange):
 # variations.
 #
 class LFO:
-  def __init__ (self,form,freq,volmin,volmax,duty,genlength):
+  def __init__ (self,form,freq,volmin,volmax,duty,genlength,name):
     self.form=form
+    self.name=name
     freqs=freq.split("-",2)
+
     if (len(freqs)==2):
       self.freq2=checkFreqLFO(float(freqs[1]))  
       self.freq=checkFreqLFO(float(freqs[0]))
+      if (genlength==0):
+        print ("ERROR: if there are two frequencies, you must specify a length for LFO %s" % (self.name))
+        sys.exit(2)
     else:
       self.freq2=checkFreqLFO(float(freq))
       self.freq=checkFreqLFO(float(freq))
-    
+      
+    if (genlength==0):
+      genlength=1./self.freq*2.
+    self.genlength=float(genlength)
+
     self.volmin=float(volmin)
     self.volmax=float(volmax)
     self.duty=float(duty)
 
-    if (genlength==0):
-      genlength=1./self.freq*2.
-    self.genlength=float(genlength)
     self.signal=[]
     self.nframes=int(math.ceil(self.genlength*frate))
     self.amplitude=(self.volmax-self.volmin)
@@ -354,14 +360,15 @@ class LFO:
 
     for x in range(self.nframes):
 
-      freq=float(x)/self.nframes*(self.freq2-self.freq)+self.freq
+      cfreq=float(x)/self.nframes*(self.freq2-self.freq)+self.freq
+      # print ("cfreq: %f" % (cfreq))
       
       # depending on form, generate signal different ways
 
       if (self.form=='sine'):  
         # minvol does not work with sine
         # waveform is offset up .5 as range is 0-1
-        self.signal[x]=math.sin(2*math.pi*(self.freq*float(x)/frate))*self.volmax/2+.5
+        self.signal[x]=math.sin(2*math.pi*(cfreq*float(x)/frate))*self.volmax/2+.5
 
       # square ---------
       # simple square wave 
@@ -378,7 +385,7 @@ class LFO:
 
       elif (self.form=='saw'):
          t=x/frate
-         cycles=math.modf(t*self.freq)
+         cycles=math.modf(t*cfreq)
          self.signal[x]=(cycles[0]*self.amplitude)+self.volmin
 
    # print ("Made LFO")
@@ -1852,10 +1859,10 @@ def doCommand (line):
          form=str(lookFor(words,"form",True,"square"))  
          freq=str(lookFor(words,"freq",True,5.))
          duty=float(lookFor(words,"duty",True,.5))   
-         volmin=float(lookFor(words,"minvol",True,1.))   
+         volmin=float(lookFor(words,"minvol",True,0.))   
          volmax=float(lookFor(words,"maxvol",True,1.))   
          length=float(lookFor(words,"length",True,0))     # default is one wavelength
-         lfos[name]=LFO(form,freq,volmin,volmax,duty,length)
+         lfos[name]=LFO(form,freq,volmin,volmax,duty,length,name)
 
       # specify output channel 1 or 2 or both
       # I've changed how balance works here because
