@@ -336,7 +336,7 @@ class LFO:
     else:
       self.freq2=checkFreqLFO(float(freq))
       self.freq=checkFreqLFO(float(freq))
-      
+
     if (genlength==0):
       genlength=1./self.freq*2.
     self.genlength=float(genlength)
@@ -349,9 +349,10 @@ class LFO:
     self.nframes=int(math.ceil(self.genlength*frate))
     self.amplitude=(self.volmax-self.volmin)
     self.sqcount=0
-    self.sqthresh=self.duty*self.nframes
     self.pos=0
     
+    #print ("LFO: %s freq:%f freq2:%f volmin:%f volmax:%f duty:%f genlength: %f" % (self.name,self.freq,self.freq2,self.volmin,self.volmax,self.duty,self.genlength))
+      
     # make a blank signal
 
     for x in range(self.nframes):
@@ -361,6 +362,9 @@ class LFO:
     for x in range(self.nframes):
 
       cfreq=float(x)/self.nframes*(self.freq2-self.freq)+self.freq
+      self.sqthresh=frate/cfreq*self.duty
+      self.wavelength=int(frate/cfreq)
+      
       # print ("cfreq: %f" % (cfreq))
       
       # depending on form, generate signal different ways
@@ -374,11 +378,14 @@ class LFO:
       # simple square wave 
 
       elif (self.form=='square'):
+        #print ("x %d sqcount %d thresh %d wavelength %d" % (x, self.sqcount, self.sqthresh, self.wavelength))
         if (self.sqcount<self.sqthresh):
           self.signal[x]=self.volmax
         else:
           self.signal[x]=self.volmin
         self.sqcount+=1
+        if (self.sqcount>self.wavelength):
+          self.sqcount=0
 
       # sawtooth ---------
       # sawtooth wave
@@ -387,6 +394,9 @@ class LFO:
          t=x/frate
          cycles=math.modf(t*cfreq)
          self.signal[x]=(cycles[0]*self.amplitude)+self.volmin
+      else:
+        print ("ERROR: Unknown LFO Form %s" % (self.form))
+        sys.exit(2);
 
    # print ("Made LFO")
 
@@ -753,7 +763,7 @@ class Wave:
                 elif (modcmd=="varyphase"):
                   if (modval==0):
                     self.vphase_lim=0
-                    print("zero varyphase %d" % (x))
+#                    print("zero varyphase %d" % (x))
                   else:
                     self.vphase_lim=clamp(modval,-.5,.5)
                     if (modval2==None):
@@ -761,7 +771,7 @@ class Wave:
                     else:
                       self.vphase_speed=clamp(modval2,.5,10)   # in seconds
                     self.vphase_count=self.vphase_speed*framerate
-                    print("time %d new vphase length: %d pct %f" % ((x/44100),self.vphase_speed, self.vphase_lim))
+#                    print("time %d new vphase length: %d pct %f" % ((x/44100),self.vphase_speed, self.vphase_lim))
                     self.start_bendphase(int(self.vphase_speed*framerate),self.vphase_lim)
 
                 elif (modcmd=="junk"):
@@ -781,7 +791,7 @@ class Wave:
           self.vphase_count-=1
           if (self.vphase_count==0):       # is the timer run down?
             self.vphase_count=self.vphase_speed*framerate    # restart counter
-            print("time %d reset vphase length: %d pct %f" % ((x/44100),self.vphase_speed, self.vphase_lim))
+#            print("time %d reset vphase length: %d pct %f" % ((x/44100),self.vphase_speed, self.vphase_lim))
 
             self.start_bendphase(self.vphase_speed*framerate,self.vphase_lim)
 
@@ -1143,17 +1153,6 @@ def doCommand (line):
     global id3comment
     global id3title
 
-    # In this case as well as the next, regex would be reliable in
-    # Perl but is a poorly documented wreck in Python. I've used a C approach
-    # here as it doesn't do weird shit.
-
-    pos=line.find("=")
-    if (pos>-1):
-        sym=line[0:pos]
-        value=line[pos+1:]
-        swaps[sym]=value
-        #print ("sym: "+sym+" = '"+value+"'")
-
     # do swaps for things that look like this:  $(thing)
     # yes, this is painful but regex in Python is badly implemented
     # and is a worse option
@@ -1175,10 +1174,22 @@ def doCommand (line):
             sys.exit("Symbol not found: '"+sym+"'")
       else:
         break
+
+    # In this case as well as the next, regex would be reliable in
+    # Perl but is a poorly documented wreck in Python. I've used a C approach
+    # here as it doesn't do weird shit.
+
+    pos=line.find("=")
+    if (pos>-1):
+        sym=line[0:pos]
+        value=line[pos+1:]
+        swaps[sym]=value
+        #print ("sym: "+sym+" = '"+value+"'")
+
       
     # does the line look like is starts with a number/time?
     #print ("Line: %s" % (line))
-    if (re.search("^\s*([+\0-9\.\-]+\s)",line)):
+    elif (re.search("^\s*([+\0-9\.\-]+\s)",line)):
 
       #subcmd=line.split(" ")
       #subcmd=re.split("^\s*([\+\.0-9]+\s)",line,2)
@@ -1272,7 +1283,12 @@ def doCommand (line):
 
             startx=timeToPos(ct)
             endx=timeToPos(et)
-            lfo=lfos[words[2]]
+            if words[2] in lfos:
+              lfo=lfos[words[2]]
+            else:
+              print ("ERROR: %s is not defined as an LFO" % (words[2]))
+              sys.exit(2)
+ 
 
             if (progress):  print ("STATUS: applying AMOD '%s' from %d to %d" % (words[2], ct, et))
 
@@ -1313,15 +1329,25 @@ def doCommand (line):
             lfoname1=str(lookFor(words,"lfobal",True,''))   # works opposite
             lfoname2=str(lookFor(words,"lfo",True,''))      # works in unison
 
-            if lfoname1 in lfos:
-              lfo=lfos[lfoname1]
-              lfo.reset()
+            # check if lfo's exist
+
+            if lfoname1!='':
+              if lfoname1 in lfos:
+                lfo=lfos[lfoname1]
+                lfo.reset()
+              else:
+                print ("ERROR: %s is not defined as an LFO" % (lfoname1))
+                sys.exit(2)
             else:
               lfo=None
-                         
-            if lfoname2 in lfos:
-              lfo2=lfos[lfoname2]
-              lfo2.reset()
+    
+            if lfoname2!='':
+              if lfoname2 in lfos:
+                lfo2=lfos[lfoname2]
+                lfo2.reset()
+              else:
+                print ("ERROR: %s is not defined as an LFO" % (lfoname2))
+                sys.exit(2)
             else:
               lfo2=None
 
@@ -1814,7 +1840,7 @@ def doCommand (line):
               for x in range(wavespec.nframes):
                 signal2.data[x+offset]=int(signal2.data[x+offset]*wavespec.signal[x]*strength/maxint)
           else:
-#           print ("don't recognize command: "+line+" at "+str(count))
+            print ("WARNING: Unrecognized command: %s" % (command))
             pass
     else:
 
@@ -1978,6 +2004,9 @@ def doCommand (line):
          sample.loadWave(st,en)
          newwave.addSample(sample)
 
+      elif (command!=''):
+         print ("WARNING: Unrecognized command: %s" % (command))
+
          # blank lines and uncrecognized commands fall through here
     return
 
@@ -2067,22 +2096,23 @@ if (outfile is None):
   print ("No output file was specified")
   sys.exit(1)
 
-""" try:
-  wav_file = wave.open(outfile, "w")
-except wave.Error:
-  print ("Could not open output '"+outfile+"'")
-  sys.exit(1)
-except:
-  print ("Sorry, something went wrong.")
-  sys.exit(1)
-   """
 count=0
-  
+
+# Maybe do something with this, but it is too slow.
+#
+#for v in signal1.data:
+#  if ((v>maxint) or (v<minint)):
+#    print ("Clipping warning")
+    
+#for v in signal2.data:
+#  if ((v>maxint) or (v<minint)):
+#    print ("Clipping warning")
+    
+
 if (progress):  print ("STATUS: writing final signal: length %5.1fs" % (nframes/frate))
 
 # Originally wrote this with the standard python library but
 # switched it over to scipy for more speed. Python is slow.
-
 
 osignal1=np.asarray(signal1.data[:nframes],dtype=np.int16)
 osignal2=np.asarray(signal2.data[:nframes],dtype=np.int16)
