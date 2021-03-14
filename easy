@@ -206,6 +206,18 @@ def upperFrame(when):
 def getTime (mod):
    return mod.get('time')
 
+#-------------------------------------------------
+# slider
+#
+# Does a linear interpolation between a start/end
+# value.
+#
+def slider(sv,ev,st,et,t):
+  if ((et-st)==0):
+    return ev
+  rv=(t-st)/(et-st)*(ev-sv)+sv
+  return rv
+ 
 #--------------------------------------------------
 # same as allocateFinalSignal but in seconds
 #
@@ -251,7 +263,24 @@ def noteToFreq(input):
     return 1000.
   else:
     return float(input)
-  
+
+#--------------------------------------------------
+
+def lookForMinSec (timest):
+  # check for minute/second format...
+  # why? because Audacity only shows minute:second format and converting from
+  # minute:second to seconds can become very confusing. For this reason
+  # we support minute:second for absolute signals only.
+
+  timest2=timest.replace('s','')
+  timest2=timest2.replace('m',':')
+
+  minsec=timest2.split(':')
+  if (len(minsec)==2):        # we have min:seconds!
+    value=float(minsec[0])*60.+float(minsec[1])
+    return value
+  return -1
+
 #--------------------------------------------------
 # Process time range
 #
@@ -260,12 +289,15 @@ def noteToFreq(input):
 # relative times. It will also check that the end time is after the
 # start time. If an end time is mandatory, it will generate an error.
 
-def handleTimeRange(input,line,needrange):
+def handleTimeRange(input2,line,needrange):
   global ct
   global et
   endst=''
 
-  #print("time input: %s" % (input))
+  # ignore the 's' for second in any situation
+  input=input2.replace('s','')
+
+  # look for a time range...
 
   times=input.split('-')
   if (len(times)==2):
@@ -279,23 +311,41 @@ def handleTimeRange(input,line,needrange):
   else:
       print ("ERROR: missing time on line '%s'" % (line))
       sys.exit(2)
-  # work out start time
-  if (startst[0]=='+'):
-    start=ct+float(startst[1:])
-  else:
-    start=float(startst)
 
-  #work out end time
-  if (endst!=''):
-    if (endst[0]=='+'):
-      end=start+float(endst[1:])
-    else:
-      end=float(endst)
+  # work out start time
+
+  minsec=lookForMinSec(startst)
+
+  if (minsec!=-1):                   # check for minutes and seconds first
+    start=minsec
   else:
-    end=0
+    if (startst[0]=='+'):           # see if we have a relative time
+      start=ct+float(startst[1:])   # add on the relative time
+    else:
+      start=float(startst)
+
+  # work out end time
+
+  minsec=lookForMinSec(endst)
+
+  if (minsec!=-1):                   # look for minutes and seconds on end time
+    end=minsec
+  else:
+    if (endst!=''):
+      if (endst[0]=='+'):
+        end=start+float(endst[1:])
+      else:
+        end=float(endst)
+    else:
+      end=0
 
   ct=start
   et=end
+
+  if ((ct>et) and (et!=0)):
+    print ("ERROR: start time %.1f is after end time %.1f" % (ct,et))
+    sys.exit(2)
+
   return(start,end)
 
 #++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -361,7 +411,8 @@ class LFO:
 
     for x in range(self.nframes):
 
-      cfreq=float(x)/self.nframes*(self.freq2-self.freq)+self.freq
+      cfreq=slider(self.freq,self.freq2,0,self.nframes,x)
+      #print ("DEBUG slider: %f" % (cfreq))
       self.sqthresh=frate/cfreq*self.duty
       self.wavelength=int(frate/cfreq)
       
@@ -372,7 +423,9 @@ class LFO:
       if (self.form=='sine'):  
         # minvol does not work with sine
         # waveform is offset up .5 as range is 0-1
-        self.signal[x]=math.sin(2*math.pi*(cfreq*float(x)/frate))*self.volmax/2+.5
+
+        # BUG HERE! for sliding descending frequencies
+        self.signal[x]=math.sin(2*math.pi*(cfreq*float(x)/frate))*self.volmax/2+.5  
 
       # square ---------
       # simple square wave 
@@ -391,6 +444,9 @@ class LFO:
       # sawtooth wave
 
       elif (self.form=='saw'):
+
+        # BUG HERE! for sliding descending frequencies
+
          t=x/frate
          cycles=math.modf(t*cfreq)
          self.signal[x]=(cycles[0]*self.amplitude)+self.volmin
@@ -1189,7 +1245,7 @@ def doCommand (line):
       
     # does the line look like is starts with a number/time?
     #print ("Line: %s" % (line))
-    elif (re.search("^\s*([+\0-9\.\-]+\s)",line)):
+    elif (re.search("^\s*([+\0-9ms:\.\-]+\s)",line)):
 
       #subcmd=line.split(" ")
       #subcmd=re.split("^\s*([\+\.0-9]+\s)",line,2)
@@ -1840,7 +1896,7 @@ def doCommand (line):
               for x in range(wavespec.nframes):
                 signal2.data[x+offset]=int(signal2.data[x+offset]*wavespec.signal[x]*strength/maxint)
           else:
-            print ("WARNING: Unrecognized command: %s" % (command))
+            print ("WARNING: Unrecognized command #2: '%s'" % (command))
             pass
     else:
 
@@ -1938,7 +1994,12 @@ def doCommand (line):
          # length command sets the overall length of the file
          # allocating enough memory to store it
 
-         nframes=upperFrame(float(words[2]))
+         timest=words[2].replace('s','')
+         ltime=lookForMinSec(timest)
+         if (ltime==-1):         # not a min sec format
+           ltime=float(timest)   # just a number
+           
+         nframes=int(ltime*frate)
          #print("nframes: "+str(nframes)+" for time "+words[2])
 
          allocateFinalSignal(nframes)
@@ -2005,7 +2066,7 @@ def doCommand (line):
          newwave.addSample(sample)
 
       elif (command!=''):
-         print ("WARNING: Unrecognized command: %s" % (command))
+         print ("WARNING: Unrecognized command: '%s'" % (command))
 
          # blank lines and uncrecognized commands fall through here
     return
@@ -2051,11 +2112,14 @@ while line:
   line=line[0].split(' ')
   match=line[0].find("length")
   if (match>-1):
-    #print (line)
-    tlength=float(line[1])
-    allocateFinalSignal(upperFrame(tlength))
-  line=f.readline()
+    timest=line[1]
+    timest=timest.replace('s','')
+    ltime=lookForMinSec(timest)
+    if (ltime==-1):         # not a min sec format
+      ltime=float(timest)   # just a number
+    allocateFinalSignal(upperFrame(ltime))
 
+  line=f.readline()
   
 f.seek (0)
 
