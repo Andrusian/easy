@@ -124,10 +124,10 @@ swaps['START']="0.0"
 def checkFreq (freq):
   if (freq<.1):
      freq=10
-     print ("WARNING: frequency below bounds.")
+     print ("\x1b[33mWARNING: frequency below bounds.\x1b[0m")
   elif (freq>10000):
      freq=10000
-     print ("WARNING: frequency above bounds.")
+     print ("\x1b[33mWARNING: frequency above bounds.\x1b[0m")
 
   return freq
 
@@ -137,10 +137,10 @@ def checkFreq (freq):
 def checkFreqLFO (freq):
   if (freq<.1):
      freq=.1
-     print ("WARNING: LFO frequency below bounds.")
+     print ("\x1b[33mWARNING: LFO frequency below bounds.\x1b[0m")
   elif (freq>200):
      freq=200
-     print ("WARNING: LFO frequency above bounds.")
+     print ("\x1b[33mWARNING: LFO frequency above bounds.\x1b[0m")
 
   return freq
 
@@ -163,7 +163,7 @@ def getFloat (line,item,hint):
   try:
     retval=float(item)
   except:
-    print ("ERROR on this line:"+line)
+    print ("\x1b[33mERROR on this line:%s\x1b[0m" % (line))
     print ("This item '"+item+"' needs to be a float.")
     print ("hint: "+hint)
     sys.exit(1)
@@ -177,7 +177,7 @@ def getInt (line,item,hint):
   try:
     retval=int(item)
   except:
-    print ("ERROR on this line:"+line)
+    print ("\x1b[33mERROR on this line: %s \x1b[0m" % (line))
     print ("This item '"+item+"' needs to be a integer.")
     print ("hint: "+hint)
     sys.exit(1)
@@ -206,6 +206,18 @@ def upperFrame(when):
 def getTime (mod):
    return mod.get('time')
 
+#-------------------------------------------------
+# slider
+#
+# Does a linear interpolation between a start/end
+# value.
+#
+def slider(sv,ev,st,et,t):
+  if ((et-st)==0):
+    return ev
+  rv=(t-st)/(et-st)*(ev-sv)+sv
+  return rv
+ 
 #--------------------------------------------------
 # same as allocateFinalSignal but in seconds
 #
@@ -251,7 +263,24 @@ def noteToFreq(input):
     return 1000.
   else:
     return float(input)
-  
+
+#--------------------------------------------------
+
+def lookForMinSec (timest):
+  # check for minute/second format...
+  # why? because Audacity only shows minute:second format and converting from
+  # minute:second to seconds can become very confusing. For this reason
+  # we support minute:second for absolute signals only.
+
+  timest2=timest.replace('s','')
+  timest2=timest2.replace('m',':')
+
+  minsec=timest2.split(':')
+  if (len(minsec)==2):        # we have min:seconds!
+    value=float(minsec[0])*60.+float(minsec[1])
+    return value
+  return -1
+
 #--------------------------------------------------
 # Process time range
 #
@@ -260,12 +289,15 @@ def noteToFreq(input):
 # relative times. It will also check that the end time is after the
 # start time. If an end time is mandatory, it will generate an error.
 
-def handleTimeRange(input,line,needrange):
+def handleTimeRange(input2,line,needrange):
   global ct
   global et
   endst=''
 
-  #print("time input: %s" % (input))
+  # ignore the 's' for second in any situation
+  input=input2.replace('s','')
+
+  # look for a time range...
 
   times=input.split('-')
   if (len(times)==2):
@@ -274,28 +306,46 @@ def handleTimeRange(input,line,needrange):
   elif (len(times)==1):
     startst=times[0]
     if (needrange==True):
-      print ("ERROR: need time range, 'start-end', on line '%s'" % (line))
+      print ("\x1b[31mERROR: need time range, 'start-end', on line '%s'\x1b[0m" % (line))
       sys.exit(2)
   else:
-      print ("ERROR: missing time on line '%s'" % (line))
+      print ("\x1b[31mERROR: missing time on line '%s'\x1b[0m" % (line))
       sys.exit(2)
-  # work out start time
-  if (startst[0]=='+'):
-    start=ct+float(startst[1:])
-  else:
-    start=float(startst)
 
-  #work out end time
-  if (endst!=''):
-    if (endst[0]=='+'):
-      end=start+float(endst[1:])
-    else:
-      end=float(endst)
+  # work out start time
+
+  minsec=lookForMinSec(startst)
+
+  if (minsec!=-1):                   # check for minutes and seconds first
+    start=minsec
   else:
-    end=0
+    if (startst[0]=='+'):           # see if we have a relative time
+      start=ct+float(startst[1:])   # add on the relative time
+    else:
+      start=float(startst)
+
+  # work out end time
+
+  minsec=lookForMinSec(endst)
+
+  if (minsec!=-1):                   # look for minutes and seconds on end time
+    end=minsec
+  else:
+    if (endst!=''):
+      if (endst[0]=='+'):
+        end=start+float(endst[1:])
+      else:
+        end=float(endst)
+    else:
+      end=0
 
   ct=start
   et=end
+
+  if ((ct>et) and (et!=0)):
+    print ("\x1b[31mERROR: start time %.1f is after end time %.1f\x1b[0m" % (ct,et))
+    sys.exit(2)
+
   return(start,end)
 
 #++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -331,7 +381,7 @@ class LFO:
       self.freq2=checkFreqLFO(float(freqs[1]))  
       self.freq=checkFreqLFO(float(freqs[0]))
       if (genlength==0):
-        print ("ERROR: if there are two frequencies, you must specify a length for LFO %s" % (self.name))
+        print ("\x1b[31mERROR: if there are two frequencies, you must specify a length for LFO %s\x1b[0m" % (self.name))
         sys.exit(2)
     else:
       self.freq2=checkFreqLFO(float(freq))
@@ -361,7 +411,8 @@ class LFO:
 
     for x in range(self.nframes):
 
-      cfreq=float(x)/self.nframes*(self.freq2-self.freq)+self.freq
+      cfreq=slider(self.freq,self.freq2,0,self.nframes,x)
+      #print ("DEBUG slider: %f" % (cfreq))
       self.sqthresh=frate/cfreq*self.duty
       self.wavelength=int(frate/cfreq)
       
@@ -372,7 +423,9 @@ class LFO:
       if (self.form=='sine'):  
         # minvol does not work with sine
         # waveform is offset up .5 as range is 0-1
-        self.signal[x]=math.sin(2*math.pi*(cfreq*float(x)/frate))*self.volmax/2+.5
+
+        # BUG HERE! for sliding descending frequencies
+        self.signal[x]=math.sin(2*math.pi*(cfreq*float(x)/frate))*self.volmax/2+.5  
 
       # square ---------
       # simple square wave 
@@ -391,11 +444,14 @@ class LFO:
       # sawtooth wave
 
       elif (self.form=='saw'):
+
+        # BUG HERE! for sliding descending frequencies
+
          t=x/frate
          cycles=math.modf(t*cfreq)
          self.signal[x]=(cycles[0]*self.amplitude)+self.volmin
       else:
-        print ("ERROR: Unknown LFO Form %s" % (self.form))
+        print ("\x1b[31mERROR: Unknown LFO Form %s\x1b[0m" % (self.form))
         sys.exit(2);
 
    # print ("Made LFO")
@@ -557,7 +613,7 @@ class Wave:
     if (progress):  print ("STATUS: rendering sound '"+self.name+"'")
 
     if (stop==-1):
-      print ("ERROR: sound %s needs a 'length:' specified" % (self.name))
+      print ("\x1b[31mERROR: sound %s needs a 'length:' specified\x1b[0m" % (self.name))
       sys.exit(2)
 
     for x in range(self.nframes): self.signal.append(0)
@@ -778,7 +834,7 @@ class Wave:
                    pass
 
                 else:
-                  print ("ERROR - Unrecognized mod event: "+modcmd)
+                  print ("\x1b[31mERROR - Unrecognized mod event: %s\x1b[31m" % (modcmd))
                 try:
                   nextmod=mods.pop(0) # grab next modifier
                 except IndexError as e:
@@ -1023,14 +1079,14 @@ def modifier (line,attime,args):
 
   options=['freq','phase','warb','warbvibrato','warbtremelo','vol','warbstop','bendvol','bendphase','volabs','fade','varyphase']
   if args[2] not in options:
-    print("ERROR: %s is not a valid sound modifier." % args[2])
+    print("\x1b[31mERROR: %s is not a valid sound modifier.\x1b[0m" % args[2])
     sys.exit()
   
 #  print (args)
   try:
     amount=float(args[4])
   except:
-    print("need a valid value for the modify command: '%s'" % line)
+    print("\x1b[31mERROR: need a valid value for the modify command: '%s'\x1b[0m" % line)
 
   try:
     amount2=float(args[6])
@@ -1102,7 +1158,7 @@ def doBalance (words):
   global balance
 
   if (nchannels==1):
-    print ("ERROR - balance command not useful for 1 channel")
+    print ("\x1b[31mERROR - balance command not useful for 1 channel\x1b[0m")
     sys.exit()
 
   chtxt=words[2]
@@ -1189,7 +1245,7 @@ def doCommand (line):
       
     # does the line look like is starts with a number/time?
     #print ("Line: %s" % (line))
-    elif (re.search("^\s*([+\0-9\.\-]+\s)",line)):
+    elif (re.search("^\s*([+\0-9ms:\.\-]+\s)",line)):
 
       #subcmd=line.split(" ")
       #subcmd=re.split("^\s*([\+\.0-9]+\s)",line,2)
@@ -1286,7 +1342,7 @@ def doCommand (line):
             if words[2] in lfos:
               lfo=lfos[words[2]]
             else:
-              print ("ERROR: %s is not defined as an LFO" % (words[2]))
+              print ("\x1b[31mERROR: %s is not defined as an LFO\x1b[0m" % (words[2]))
               sys.exit(2)
  
 
@@ -1336,7 +1392,7 @@ def doCommand (line):
                 lfo=lfos[lfoname1]
                 lfo.reset()
               else:
-                print ("ERROR: %s is not defined as an LFO" % (lfoname1))
+                print ("\x1b[31mERROR: %s is not defined as an LFO\x1b[0m" % (lfoname1))
                 sys.exit(2)
             else:
               lfo=None
@@ -1346,7 +1402,7 @@ def doCommand (line):
                 lfo2=lfos[lfoname2]
                 lfo2.reset()
               else:
-                print ("ERROR: %s is not defined as an LFO" % (lfoname2))
+                print ("\x1b[31mERROR: %s is not defined as an LFO\x1b[0m" % (lfoname2))
                 sys.exit(2)
             else:
               lfo2=None
@@ -1450,7 +1506,7 @@ def doCommand (line):
 
             name=words[2]
             if (not words[2] in waves):
-              print ("sound '"+words[2]+"' is not defined")
+              print ("\x1b[31mERROR: sound '"+words[2]+"' is not defined\x1b[0m")
               sys.exit(1)
                  
             wavespec=waves[name]
@@ -1795,7 +1851,7 @@ def doCommand (line):
                   signal2.data[x]=signal2.data[x]*count2/count
                   count2+=1
             else:
-               print("ERROR: notch out of bounds, skipping")
+               print("\x1b[33mWARNING: notch out of bounds, skipping\x1b[0m")
 
           # modulate multiplies when combining sound waves
 
@@ -1840,7 +1896,7 @@ def doCommand (line):
               for x in range(wavespec.nframes):
                 signal2.data[x+offset]=int(signal2.data[x+offset]*wavespec.signal[x]*strength/maxint)
           else:
-            print ("WARNING: Unrecognized command: %s" % (command))
+            print ("\x1b[33mWARNING: Unrecognized command #2: '%s'\x1b[0m" % (command))
             pass
     else:
 
@@ -1864,7 +1920,7 @@ def doCommand (line):
       if (command=="print"):
           m=re.search('\"(.*?)\"',line)
           if m:
-            print (m.group(1))
+            print ("\x1b[96m"+m.group(1)+"\x1b[0m")
 
       elif (command=="defsound"):
          name=words[2]
@@ -1938,7 +1994,12 @@ def doCommand (line):
          # length command sets the overall length of the file
          # allocating enough memory to store it
 
-         nframes=upperFrame(float(words[2]))
+         timest=words[2].replace('s','')
+         ltime=lookForMinSec(timest)
+         if (ltime==-1):         # not a min sec format
+           ltime=float(timest)   # just a number
+           
+         nframes=int(ltime*frate)
          #print("nframes: "+str(nframes)+" for time "+words[2])
 
          allocateFinalSignal(nframes)
@@ -1982,7 +2043,7 @@ def doCommand (line):
          try:
            inc=open(iname,"r")
          except:
-           print ("Could not open include file '%s' \n" % (infile))
+           print ("\x1b[31mERROR: Could not open include file '%s'\x1b[0m \n" % (infile))
            sys.exit(1)
 
          for line in inc:
@@ -2005,7 +2066,7 @@ def doCommand (line):
          newwave.addSample(sample)
 
       elif (command!=''):
-         print ("WARNING: Unrecognized command: %s" % (command))
+         print ("\x1b[33mWARNING: Unrecognized command: '%s'\x1b[0m" % (command))
 
          # blank lines and uncrecognized commands fall through here
     return
@@ -2051,11 +2112,14 @@ while line:
   line=line[0].split(' ')
   match=line[0].find("length")
   if (match>-1):
-    #print (line)
-    tlength=float(line[1])
-    allocateFinalSignal(upperFrame(tlength))
-  line=f.readline()
+    timest=line[1]
+    timest=timest.replace('s','')
+    ltime=lookForMinSec(timest)
+    if (ltime==-1):         # not a min sec format
+      ltime=float(timest)   # just a number
+    allocateFinalSignal(upperFrame(ltime))
 
+  line=f.readline()
   
 f.seek (0)
 
@@ -2093,7 +2157,7 @@ f.close()
 # finally, write the wav file out
 
 if (outfile is None):
-  print ("No output file was specified")
+  print ("\x1b[31mERROR: No output file was specified.\x1b[0m")
   sys.exit(1)
 
 count=0
@@ -2109,7 +2173,7 @@ count=0
 #    print ("Clipping warning")
     
 
-if (progress):  print ("STATUS: writing final signal: length %5.1fs" % (nframes/frate))
+if (progress):  print ("\x1b[32mSTATUS: writing final signal: length %5.1fs\x1b[0m" % (nframes/frate))
 
 # Originally wrote this with the standard python library but
 # switched it over to scipy for more speed. Python is slow.
@@ -2168,7 +2232,7 @@ if (domp3):
 if clipping:
   print("FYI: clipping occured.")
 
-print ("output file is complete: "+outfile)
+print ("output file is complete: \x1b[5m\x1b[92m%s\x1b[0m" % outfile)
 
 #debug.close()
 
