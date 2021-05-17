@@ -39,6 +39,8 @@ import scipy.io
 import numpy as np
 from notes import *
 import copy
+import json
+
 
 #print (sys.version)
 
@@ -60,6 +62,9 @@ id3title="none"
 id3comment="none"
 id3author="none"
 verbose=0
+count=0
+oneshot=1
+basespeed=1000     # fastest speed in which phase shifts happen (in samples)
 
 nframes = 0
 comptype = "NONE"
@@ -70,11 +75,19 @@ balance=.5
 balanceL=1
 balanceR=1
 outfile=None
+clips=0
 
 waves={}          # a hash of waveforms
 lfos={}           # a hash of Low Frequency Oscilator signals
 macros={}         # hash of multi-line macros
 swaps={}          # hash of short symbol swaps
+
+def clipWarning (x,str):
+  global clips
+  global count
+  if (clips==1):
+    print ("\x1b[31mERROR: clipping happening at %5.1f on line '%s' \x1b[0m" % (float(x/frate),str))
+    sys.exit(2)
 
 #--------------------------------------------------
 # A class that provides a simple wrapper around
@@ -130,6 +143,23 @@ def checkFreq (freq):
      print ("\x1b[33mWARNING: frequency above bounds.\x1b[0m")
 
   return freq
+
+#----------------------------------------------
+# The strength of phase changes is non-linear: more weighted
+# towards the lower values then leveling out.
+# This correction factor makes the scale more even.
+#
+# This is a curve fit worked out by calculating the triphase
+# power and then figuring out the new values that make it
+# even intervals.
+
+def phaseLinear(val):
+  if (val>0):
+    out=val*val*1.1413+0.3767*val
+  else:
+    out=-val*val*1.1413-0.3767*val
+  
+  return out
 
 #--------------------------------------------------
 # check frequency range valid for LFOs
@@ -394,6 +424,8 @@ class LFO:
     self.volmin=float(volmin)
     self.volmax=float(volmax)
     self.duty=float(duty)
+    average=(self.volmin+self.volmax)/2.
+    diff=(self.volmax-self.volmin)/2.
 
     self.signal=[]
     self.nframes=int(math.ceil(self.genlength*frate))
@@ -425,7 +457,7 @@ class LFO:
         # waveform is offset up .5 as range is 0-1
 
         # BUG HERE! for sliding descending frequencies
-        self.signal[x]=math.sin(2*math.pi*(cfreq*float(x)/frate))*self.volmax/2+.5  
+        self.signal[x]=math.sin(2*math.pi*(cfreq*float(x)/frate))*diff+average
 
       # square ---------
       # simple square wave 
@@ -513,7 +545,7 @@ class Sample:
 #    print ("signal: %d startx: %f endx: %f" % (len(self.signal),startx, endx))
     self.data=None    #an attempt at freeing memory
 
-    #++++++++++++++++++++++++++++++++++++++++++++++++++
+#++++++++++++++++++++++++++++++++++++++++++++++++++
 # Wave Class ... note, commands renamed to 'sound'
 #
 # This class does most of the work in creating
@@ -546,7 +578,9 @@ class Wave:
     else:
       self.vol=float(vol)
       self.vol2=float(vol)
-
+     
+    self.absshif=0        # absolute phase shift in cycles
+      
     self.time=0
     self.form=form
     self.fadein=float(fadein)
@@ -580,6 +614,7 @@ class Wave:
     self.fadeinc=0
     self.fadelength=-1
     self.rendered=False
+    self.speedph=1
 
   def addSample (self,obj):
     self.signal=obj.signal
@@ -595,13 +630,14 @@ class Wave:
 
   # add modification events
 
-  def addmod (self, attime,event,value,value2):
-    self.mods.append({'time':attime,'value':value,'value2':value2,'event':event})
+  def addmod (self, attime,event,value,value2,speedmod):
+    self.mods.append({'time':attime,'value':value,'value2':value2,'event':event,'speedmod':speedmod})
 
   def start_bendphase(self,length,percent):
-    self.benphasepct=percent
-    self.bendphasecounter=1
-    self.bendphaselength=length
+    self.bendphasepct=percent          # the depth of the phase change
+    self.bendphaselength=length       # the length of time to hold the phase change
+    self.bendphasecounter=1           # starts the bendphase happening
+    # note - there is to way to modify the speed of the phase change but maybe there should be?
    
   def makeWave(self,wchannel):
     vol=self.vol
@@ -610,7 +646,7 @@ class Wave:
     freq=self.freq
     self.nframes=stop-start
 
-    if (progress):  print ("STATUS: rendering sound '"+self.name+"'")
+    if (progress):  print ("STATUS: rendering sound '"+self.name+"' in memory")
 
     if (stop==-1):
       print ("\x1b[31mERROR: sound %s needs a 'length:' specified\x1b[0m" % (self.name))
@@ -736,6 +772,7 @@ class Wave:
                 modcmd=nextmod['event']
                 modval=float(nextmod['value'])
                 modval2=nextmod['value2']
+                speedmod=nextmod['speedmod']
                 #                   print ("nextmod at: "+str(nextmod['time'])+" cmd:"+modcmd)
 
                 # these lines set triggers that are executed
@@ -765,9 +802,11 @@ class Wave:
                 # shift phase - normalized
 
                 elif (modcmd=="phase"):
-                  modphase=modval
-                  shif=int(math.floor(modphase*frate/self.freqcurrent))  # how much to shift fwd/back
-                  #debug.write (self.name+": PHASE TRIGGER\n")
+                  modphase=-phaseLinear(modval)  # reverse it so positive is to left
+                  shif=int(modphase*frate/self.freqcurrent)-self.absshif  # how much to shift fwd/back
+                  ##print ("%6.2f phase shif amt %d" % (x/float(frate), shif))
+
+                  self.speedph=speedmod
 
                 # vol is a quick volime change relative to original base volume
 
@@ -780,7 +819,7 @@ class Wave:
                 elif (modcmd=="fade"):
                   self.fade=True
                   self.fadevol=modval
-                  self.fadeamount=float(self.fadevol)-self.vol
+                  self.fadeamount=float(self.fadevol)-vol
                   if (modval2==None):
                     self.fadelength=int(framerate*1)    # 1 s
                   else:
@@ -806,29 +845,44 @@ class Wave:
 
                 # bendphase alters the phase and then it moves it back after a period of time
 
-                elif (modcmd=="bendphase"):    
-                  self.bendphasepct=modval
-                  self.bendphasecounter=1
-                  if (modval2==None):
-                    self.bendphaselength=int(framerate*.5)
+                elif (modcmd=="bendphase"):
+                  if (modval==0):
+                    bendphasecounter=0     # cancels any bendphase in progress
+                    self.speedph=1
                   else:
-                    self.bendphaselength=int(framerate*float(modval2))
+                    
+                    self.speedph=speedmod
+                    ##print ("self.speedph %d" % self.speedph)
+                    if (modval2==None):
+                      self.start_bendphase(round(framerate*.5),-phaseLinear(modval))
+                         # modval is reversed so +ve is towards left channel
+                         # no second value? default to 1/2 sec in frames            
+                    else:
+                      self.start_bendphase(round(framerate*float(modval2)/2),modval)   # otherwise, take number and convert to frames
+ 
 
                 # varyphase repeats the bendphase events over and over until turned off
 
                 elif (modcmd=="varyphase"):
                   if (modval==0):
                     self.vphase_lim=0
-#                    print("zero varyphase %d" % (x))
+                    # print("zero varyphase %d" % (x))
                   else:
-                    self.vphase_lim=clamp(modval,-.5,.5)
+                    self.vphase_lim=clamp(-phaseLinear(modval),-.5,.5)   #modval is reversed
+
+                    # only do with valid varyphase...
+
                     if (modval2==None):
                       self.vphase_speed=5
                     else:
-                      self.vphase_speed=clamp(modval2,.5,10)   # in seconds
-                    self.vphase_count=self.vphase_speed*framerate
-#                    print("time %d new vphase length: %d pct %f" % ((x/44100),self.vphase_speed, self.vphase_lim))
-                    self.start_bendphase(int(self.vphase_speed*framerate),self.vphase_lim)
+                      self.vphase_speed=clamp(modval2,.25,10)   # in seconds
+
+
+                    self.vphase_count=self.vphase_speed*framerate+10   # time delay repeat
+                    self.speedph=speedmod
+                    self.start_bendphase(round(self.vphase_speed*framerate/2),self.vphase_lim)
+                    ##print("time %6.2f NEW vphase length: %5.1f pct %f" \
+                    ##      % (float(x/44100.),self.vphase_speed, self.vphase_lim))
 
                 elif (modcmd=="junk"):
                    pass
@@ -846,10 +900,10 @@ class Wave:
         if (self.vphase_lim!=0):
           self.vphase_count-=1
           if (self.vphase_count==0):       # is the timer run down?
-            self.vphase_count=self.vphase_speed*framerate    # restart counter
-#            print("time %d reset vphase length: %d pct %f" % ((x/44100),self.vphase_speed, self.vphase_lim))
+            self.vphase_count=self.vphase_speed*framerate+10    # restart counter
+            ##print("time %6.2f reset vphase length: %5.1f pct %f" % (float(x/44100.),self.vphase_speed, self.vphase_lim))
 
-            self.start_bendphase(self.vphase_speed*framerate,self.vphase_lim)
+            self.start_bendphase(round(self.vphase_speed*framerate/2),self.vphase_lim)
 
         # built in lfo
         #
@@ -904,7 +958,7 @@ class Wave:
           if (self.fadelength>=0):
             self.vol+=self.fadeinc  # may not be the best way due to numerical accuracy
             targetvol=self.vol
-            self.vol2=self.vol
+            self.vol2=targetvol
 
             if (self.fadelength==0):
               self.fade=False
@@ -934,30 +988,46 @@ class Wave:
         # for handling phase shifts should do most of the work
 
         if (self.bendphasecounter>0):
+          if (self.bendphasecounter==1):  # start shifting phase?
+            shif=int(self.bendphasepct*frate/self.freqcurrent)-self.absshif   # shift
+            ##print ("%6.2f bendphase START shif amt %d" % (x/float(frate), shif))
           self.bendphasecounter+=1
-          shif=int(math.floor(self.bendphasepct*frate/self.freqcurrent))   # shift
+        
           if (self.bendphasecounter>=self.bendphaselength):
-            self.bendphasecounter=-self.bendphaselength
+            self.bendphasecounter=-self.bendphaselength  # start moving back
+            shif=int(-self.bendphasepct*frate/self.freqcurrent)-self.absshif   # shift back
+            ##print ("%6.2f bendphase BACK shif amt %d" % (x/float(frate), shif))
+            
         elif (self.bendphasecounter<0):
           self.bendphasecounter+=1
-          shif=int(math.floor(-self.bendphasepct*frate/self.freqcurrent))   # shift back
+          
           # will end on 0 automatically
 
         # adjust phase gradually
+        global oneshot
+        
+        shif_speed=int(basespeed*self.speedph)
 
         if (shif>0):
           #debug.write(self.name+" shif+ "+str(shif)+" x: "+str(x)+" time: "+str(now)+"\n")
-
           #print("shif+ "+str(shif)+" x: "+str(x)+" time: "+str(now))
-          if (x%1000==0):   # adjust very slowly
+          if (x%shif_speed==0):   # adjust very slowly
             phshift+=1
             shif=shif-1
+            oneshot=1
+            self.absshif+=1     # tracks the absolute phase position
         elif (shif<0):
           #debug.write(self.name+" shif- "+str(shif)+" x: "+str(x)+" time: "+str(now)+"\n")
           #print("shif- "+str(shif)+" x: "+str(x)+" time: "+str(now))
-          if (x%1000==0):   # adjust very slowly
+          if (x%shif_speed==0):   # adjust very slowly
             phshift-=1
             shif=shif+1
+            oneshot=1
+            self.absshif-=1     # tracks the absolute phase position
+        else:
+          if (oneshot==1):
+            oneshot=0
+            ##print ("%6.2f shif now at zero" % (x/44100.))
 
         #----------------------------------------
         # FINALLY! We get to actually generating a signal!
@@ -1072,10 +1142,14 @@ class Wave:
 def modifier (line,attime,args):
    
   if (not args[0] in waves):
-    print ("sound '"+args[2]+"' is not defined")
+    print ("sound '"+args[0]+"' is not defined in args:")
+    print (line)
+    print (args)
     sys.exit(1)
 
   name=args[0]
+  amount=0
+  amount2=0
 
   options=['freq','phase','warb','warbvibrato','warbtremelo','vol','warbstop','bendvol','bendphase','volabs','fade','varyphase']
   if args[2] not in options:
@@ -1093,8 +1167,28 @@ def modifier (line,attime,args):
   except:
     amount2=None
 
+  # look for speed
+
+  speed1=lookFor(args,"veryslow",False,False)
+  speed2=lookFor(args,"slow",False,False)
+  speed3=lookFor(args,"medium",False,False)
+  speed4=lookFor(args,"fast",False,False)
+
+  # the speed multiplier for each speed is here
+  
+  if (speed1):
+    speedmod=20
+  elif (speed2):
+    speedmod=10
+  elif (speed3):
+    speedmod=5
+  elif (speed4):
+    speedmod=1
+  else:
+    speedmod=4
+  
   wavespec=waves[name]
-  wavespec.addmod(attime,args[2],amount,amount2)
+  wavespec.addmod(attime,args[2],amount,amount2,speedmod)
   wavespec.signal=[]   # blanks any previous rendering of sound
   wavespec.signal2=[]
   wavespec.rendered=False
@@ -1202,6 +1296,7 @@ def doCommand (line):
     global balance
     global outfile
     global ct
+    global et
     global exit
     global signal1
     global signal2
@@ -1300,6 +1395,40 @@ def doCommand (line):
               else:
                 modargs.append(word)
 
+
+          elif (command=="funscript"): # ------------------------------------------- FUNSCRIPT
+
+            # use a funscript file to generate phase commands
+            # the time position will be added to the timestamps in the funscript file
+            # 0-100 position in funscript are mapped to -.5 to .5 phase
+
+            handleTimeRange(subcmd[0],line,0)
+
+            filename=words[2]
+            sound=words[4]
+            if (not sound in waves):
+              print ("sound '"+sound+"' is not defined")
+              sys.exit(1)
+
+            with open(filename) as fun:
+              funscript=json.load(fun)
+
+              if (progress):  print ("STATUS: loading funscript format file: '"+filename+"' at "+str(ct))
+
+              for action in funscript['actions']:
+                amount=(action['pos']-50)/100.
+                sec=action['at']/1000.+ct
+                modargs=[]
+                modargs.append(sound)
+                modargs.append('')
+                modargs.append('phase')
+                modargs.append('')
+                modargs.append(str(amount))
+                modargs.append('')
+                modargs.append('medium')
+                modifier(line,sec,modargs)
+                fun.close()
+
           elif (command=="resample"):    #-------------------------------------------- RESAMPLE
 
             # resample pulls an interesting section of the output signal back into a Wave for
@@ -1335,7 +1464,17 @@ def doCommand (line):
           elif (command=="amod"):  # ------------------------------------------------- AMOD
             # uses an LFO signal to vary volume on an output signal
             #print (str(ct)+" amod:"+words[2])
-            handleTimeRange(subcmd[0],line,1)
+
+            amod_length=float(lookFor(words,"length",True,'-1'))   # length is optional
+
+            print ("amod_length: %4.1f" % amod_length)
+            print (line)
+            
+            if (amod_length==-1):
+              handleTimeRange(subcmd[0],line,1)   # or you can use time range
+            else:
+              handleTimeRange(subcmd[0],line,0)   # if length provided
+              et=ct+amod_length
 
             startx=timeToPos(ct)
             endx=timeToPos(et)
@@ -1379,7 +1518,7 @@ def doCommand (line):
               countx=0
 
             name=words[2]
-            if (progress):  print ("STATUS: mixing sound '"+name+"'")
+            if (progress):  print ("STATUS: mixing sound %s at time %-7.2f" % (name,ct))
 
             strength=float(lookFor(words,"vol",True,1.))
             lfoname1=str(lookFor(words,"lfobal",True,''))   # works opposite
@@ -1425,7 +1564,7 @@ def doCommand (line):
               pass
 
             wavespec=waves[name]
-            print ("mix "+name+" size "+str(wavespec.stop)+" at "+str(ct))
+            # print ("mix "+name+" size "+str(wavespec.stop)+" at "+str(ct))
 
             if (len(wavespec.signal)==0):
               wavespec.makeWave('')
@@ -1457,6 +1596,8 @@ def doCommand (line):
                   mixval=signal1.data[x+offset]+fromsignal[x]*strength*balanceL
 
                 signal1.data[x+offset]=mixval
+                if (abs(mixval)>maxint):
+                  clipWarning(x+offset,line)
 
                 # check for truncated signal
                 count+=1
@@ -1483,6 +1624,8 @@ def doCommand (line):
                   mixval=signal2.data[x+offset]+fromsignal[x]*strength*balanceR
 
                 signal2.data[x+offset]=mixval
+                if (abs(mixval)>maxint):
+                  clipWarning(x+offset,line)
 
                 # check for truncated signal
                 count+=1
@@ -2077,7 +2220,7 @@ nchannels=2
 domp3=1
 
 try:
-  opts,args=getopt.getopt(sys.argv[1:],"vhf:")
+  opts,args=getopt.getopt(sys.argv[1:],"vhcf:")
 except getopt.GetoptError:
   print ("easy: unrecognized argument")
   sys.exit(2)
@@ -2089,9 +2232,9 @@ for opt,arg in opts:
   elif opt == '-v':
     verbose=1
   elif opt == '-f':
-    infile=arg 
-
-
+    infile=arg
+  elif opt == '-c':
+    clips=1
 
 # debug=open("___debug.txt","w+") # open the debug file
 
@@ -2235,4 +2378,3 @@ if clipping:
 print ("output file is complete: \x1b[5m\x1b[92m%s\x1b[0m" % outfile)
 
 #debug.close()
-

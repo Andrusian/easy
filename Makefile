@@ -20,6 +20,9 @@ test2:
 	$(stereo) test2/ts2l.e
 	$(stereo) test2/ts2o.e
 	$(stereo) test2/ts2p.e
+	$(stereo) test2/ts2q.e
+	$(stereo) test2/ts2r.e
+	$(stereo) test2/ts2s.e
 test:
 	$(stereo) test/test_verysimple.e
 	$(stereo) test/test_pitch.e

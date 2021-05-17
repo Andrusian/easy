@@ -25,49 +25,103 @@ import time
 import os.path
 import argparse
 import sys
+import time
+
+mintime=0.5              # seconds between events
+ignore_mintime=True      # use mintime between events
+phase=float(0)           # start at close to zero
+
+keycaps = {
+    "1": "warb+",
+    "2": "warb-",
+    "3": "ph-",
+    "4": "bend+",
+    "5": "bend++",
+    "6": "ph+",
+    "7": "vol-",
+    "8": "vol+",
+    "9": "ph++",
+    "_P": "ph--",
+    "_PLUS": "ph0",
+    "_MINUS": "ph0",
+    "_MULTIPLY": " ",
+    "_ENTER": "vol+",
+    "_DIVIDE": " ",
+    "0": "tap"
+    }
+
+locations = {
+    "1": (0,150),
+    "2": (50,150),
+    "3": (100,150),
+    "4": (0,100),
+    "5": (50,100),
+    "6": (100,100),
+    "7": (0,50),
+    "8": (50,50),
+    "9": (100,50),
+    "_P": (100,200),
+    "_PLUS": (150,75),
+    "_MINUS": (150,0),
+    "_MULTIPLY": (150,0),
+    "_ENTER": (150,175),
+    "_DIVIDE": (100,0),
+    "0": (0,200)
+    }
+
 
 parser = argparse.ArgumentParser(description='Monitor keystroke for estim timing')
+parser.add_argument('-n', help = "don't impose minimum time of 0.5s")
 parser.add_argument('-f', help = "timing basefile name")
 args = parser.parse_args()
 filename=args.f+".e"
+if (args.n):
+    ignore_mintime=True
 
 if (os.path.exists(filename)):
     print("file %s already exists. Erase it first." % (filename))
     sys.exit("exiting...")
 
-print ('''
-
-TYPICAL DEFAULTS
-
--------------------------------------------
-|  /   /  |          |          |         |                   
-| /   /   |  mark    |  pain    |  vol=0  |                   
-|/   /    |          |          |         |                   
--------------------------------------------
-|  right  |          |  head    |         |                   
-|  buzz   |  amod    |  buzz    |         |                   
-|         |          |          |         |                   
----------------------------------  vol up |
-|         |          |          |         |                   
-|  base   | stronger |  head    |         |                   
-| (strong)|          | (strong) |         |                   
--------------------------------------------
-|         |          |          |         |                   
-|  base   |  strong  |  head    |         |                   
-| (soft)  |          | (soft)   |   head  |                   
----------------------------------   long  |
-|                    |          |         |                   
-|    quick tap       |  hard    |         |                   
-|                    |    tap   |         |                   
--------------------------------------------
-  right      both       left
-
-
-''') 
-
-
-
+#----------------------------------------
     
+def drawKeys(screen,x,y,pushed):
+
+   points=[]
+   pygame.draw.rect(screen,(66,75,66),Rect(x,y,200,250))    #background
+
+   points.append((x+0,y+0))      # top left
+   points.append((x+200,y+0))    # top right
+   points.append((x+200,y+250))  # bottom right
+   points.append((x+0,y+250))    # bottom left
+   points.append((x+0,y+0))      # start
+
+   pygame.draw.lines(screen,(0,0,0),False,points,3)
+   pygame.draw.lines(screen,(0,0,0),False,((x+0,y+50),(x+200,y+50)),3)
+   pygame.draw.lines(screen,(0,0,0),False,((x+0,y+100),(x+150,y+100)),3)
+   pygame.draw.lines(screen,(0,0,0),False,((x+0,y+150),(x+200,y+150)),3)
+   pygame.draw.lines(screen,(0,0,0),False,((x+0,y+200),(x+150,y+200)),3)
+
+   pygame.draw.lines(screen,(0,0,0),False,((x+50,y+0),(x+50,y+200)),3)
+   pygame.draw.lines(screen,(0,0,0),False,((x+100,y+0),(x+100,y+250)),3)
+   pygame.draw.lines(screen,(0,0,0),False,((x+150,y+0),(x+150,y+250)),3)
+
+   for key in locations:
+       point=locations[key]
+       label=keycaps[key]
+       xl=point[0]
+       yl=point[1]
+
+       text = font2.render(label, True, (255, 255, 255), (66, 66, 66))
+       textRect = text.get_rect()
+       textRect.centerx = x+xl+25
+       textRect.centery = y+yl+25
+       screen.blit(text, textRect)
+       
+   pygame.display.update()
+
+
+#----------------------------------------
+   
 f=open(args.f+".e","w")
 
 # start the output file with some boiler plate stuff to fill in
@@ -84,9 +138,9 @@ output xxx.wav                 # TO DO - FILL ME IN
 # simple file. If you make the sounds too long and tap too
 # often you will drive into clipping.
 #
-defsound BASEL form:sine freq:900 vol:.7 fadein:.75 fadeout:0.1 length:442
-defsound BASER form:sine freq:900.1 vol:.7 fadein:.75 fadeout:0.1 length:442
-defsound QTAP form:square freq:600 vol:.2 fadein:.15 length:.25
+defsound BASEL form:sine freq:900 vol:.7 fadein:.75 fadeout:0.1 length:FILL IN!
+defsound BASER form:sine freq:900 vol:.7 fadein:.75 fadeout:0.1 length:FILL IN!
+defsound QTAP form:comp freq:600 vol:.2 fadein:.15 fadeout:0.0 length:.55
 defsound HTAP form:square freq:610 vol:.3 fadein:.1 length:.25
 defsound STRONG form:poly vol:.1 fadein:.25 fadeout:.2 length:1.5
 defsound STRONGER form:poly2 vol:.2 fadein:.2 fadeout:.2 langth:3
@@ -97,70 +151,87 @@ defsound STRONGER form:poly2 vol:.2 fadein:.2 fadeout:.2 langth:3
 #
 
 event0=mix QTAP
+event02=noop
 event0R=noop
-eventP=mix HTAP
+event0R_2=noop
+
+thing=modify BASER phase
+
+
+event9=modify BASER phase .5 slow
+event9R=modify 
+event6=modify BASER phase .3 slow
+event6R=noop
+event3=modify BASER phase -.3 slow
+event3R=noop
+eventP=modify BASER phase -.5 slow
 eventPR=noop
 
-event7=modify BASER warbtremelo .2
-event7R=modify BASER warbtremelo 0
-event4=modify BASER phase +.4
-event4R=modify BASER phase -.4
-event1=modify BASER phase +.2
-event1R=modify BASER phase -.2 
+event_ENT=modify BASER vol .1
+event_ENT_2=modify BASEL vol .1
+event_ENTR=modify BASER vol -.1
+event_ENTR_2=modify BASEL vol -.1
 
-event8=noop   # to do
-event8R=noop
-event5=mix STRONGER
-event5R=noop
-event2=mix STRONG
-event2R=noop
-
-event9=modify BASEL warbtremelo .2
-event9R=modify BASEL warbtremelo 0
-event6=modify BASEL phase +.4
-event6R=modify BASEL phase -.4
-event3=modify BASEL phase +.2
-event3R=modify BASEL phase -.2
-
-event_ENT=bendphase .5 3
-event_ENTR=noop
-
-event_PLUS=modify BASEL vol 0 ; modify BASER vol 0
+event_PLUS=modify BASER phase 0
 event_PLUSR=noop
+event_PLUS_2=noop
+event_PLUS2=noop
+event_PLUSR_2=noop
 
-event_MINUS=modify BASEL volabs 0 ; modify BASER volabs 0
+event_MINUS=modify BASER phase 0
 event_MINUSR=noop
 
-event0R_2=noop
-event1R_2=noop
-event2R_2=noop
-event3R_2=noop
+
+# ----------
+# fade up and down
+
+event7=modify BASER fade -.1 2
+event72=modify BASEL fade -.1 2
+event7R=noop
+event7R_2=noop
+
+event8=modify BASER fade  .1 2
+event82=modify BASEL fade  .1 2
+event8R=noop
+event8R_2=noop
+
+#-------
+# some bendvols
+
+event4=modify BASER bendvol +.05 4
+event42=modify BASEL bendvol +.05 4
+event4R=noop
 event4R_2=noop
+
+event5=modify BASER bendvol +.1 4
+event52=modify BASEL bendvol +.1 4
+event5R=noop
+event5R_2=noop
+
+event1=modify BASER warb 4
+event12=modify BASER warbtremelo 1
+event1R=noop
+event1R_2=noop
+
+event2=modify BASER warbstop
+event22=noop
+event2R=noop
+event2R_2=noop
+
+
+#------------
+
+
+event3R_2=noop
 event5R_2=noop
 event6R_2=noop
-event7R_2=noop
-event8R_2=noop
 event9R_2=noop
 
-event02=noop
-event12=noop
-event22=noop
 event32=noop
-event42=noop
 event52=noop
 event62=noop
-event72=noop
-event82=noop
 event92=noop
 
-event_ENT=bendphase .5 3
-event_ENTR=noop
-
-event_PLUS=modify BASEL vol 0 ; modify BASER vol 0
-event_PLUSR=noop
-
-event_MINUS=modify BASEL volabs 0 ; modify BASER volabs 0
-event_MINUSR=noop
 
 #
 #---------------------------------------------
@@ -173,14 +244,92 @@ event_MINUSR=noop
 #------------------------------
 # Graphics stuff... keeping this simple...
 
-def display(str):
-    text = font.render(str, True, (255, 255, 255), (66, 66, 66))
-    textRect = text.get_rect()
-    textRect.centerx = screen.get_rect().centerx
-    textRect.centery = screen.get_rect().centery
+def updatePhase():
+    global phase
+    pygame.draw.rect(screen,(66,66,66),Rect(0,200,200,200))    #background
 
-    screen.blit(text, textRect)
+
+    # decide color on meter needle
+    # you could be seeing this out the corner of your eye
+
+    if (phase>=.49):
+        needleColor=(255,99,255)
+    elif (phase>=.4):
+        needleColor=(33,33,200)
+    elif (phase>=.3):
+        needleColor=(33,33,160)
+    elif (phase>=.2):
+        needleColor=(33,33,120)
+    elif (phase>=.1):
+        needleColor=(33,33,99)
+    elif (phase>=.01):
+        needleColor=(33,33,66)
+    elif (phase==0):
+        needleColor=(33,33,33)
+    elif (phase<=-.49):
+        needleColor=(255,255,99)
+    elif (phase<=-.4):
+        needleColor=(33,200,33)
+    elif (phase<=-.3):
+        needleColor=(33,160,33)
+    elif (phase<=-.2):
+        needleColor=(33,120,33)
+    elif (phase<=-.1):
+        needleColor=(33,99,33)
+    elif (phase<=-.01):
+        needleColor=(33,66,33)
+    else:
+        needleColor=(33,33,33)
+
+    # print ("%d %d %d" % (needleColor[0],needleColor[1],needleColor[2]))
+
+    labelText=font.render("Phase",True,(255,255,255), (66,66,66))
+    labelRect=labelText.get_rect()
+    labelRect.centerx=35
+    labelRect.centery=210
+    screen.blit(labelText,labelRect)
+
+    pygame.draw.rect(screen,(160,160,160),Rect(8,230,56,110))    #border
+    pygame.draw.rect(screen,(128,128,128),Rect(10,230,50,110))  #background of meter
+    pygame.draw.rect(screen,needleColor,Rect(11,280+int(-phase*100),48,10))  #needle on meter
+    phaseText=font.render(str(phase),True,(255,255,0), (66,66,66))
+    phaseRect=phaseText.get_rect()
+    phaseRect.centerx=35
+    phaseRect.centery=350
+    
+    screen.blit(phaseText,phaseRect)
     pygame.display.update()
+
+def updateTime(elapsedst):
+    pygame.draw.rect(screen,(66,66,66),Rect(0,0,200,200))    #background
+
+
+    labelText=font.render("Time Elapsed (s)",True,(255,255,255), (66,66,66))
+    labelRect=labelText.get_rect()
+    labelRect.centerx=100
+    labelRect.centery=10
+    screen.blit(labelText,labelRect)
+
+    labelText2=font.render(elapsedst,True,(255,255,0), (66,66,66))
+    labelRect2=labelText2.get_rect()
+    labelRect2.centerx=100
+    labelRect2.centery=40
+    screen.blit(labelText2,labelRect2)
+
+    pygame.display.update()
+
+def showEvent(string):
+    pygame.draw.rect(screen,(33,33,33),Rect(200,0,200,200))    #background
+    pygame.draw.rect(screen,(66,66,66),Rect(204,4,192,192))    #background
+
+    labelText=font.render(string,True,(255,255,255), (66,66,66))
+    labelRect=labelText.get_rect()
+    labelRect.centerx=300
+    labelRect.centery=100
+    screen.blit(labelText,labelRect)
+    pygame.display.update()
+    
+
 
 def display2(str,r,g,b):
     text = font.render(str, True, (255, 255, 255), (r, g, b))
@@ -197,6 +346,12 @@ def display3(x,y,str,r,g,b):
     textRect.centerx = screen.get_rect().x
     textRect.centery = screen.get_rect().y
 
+def display4(str):
+    text = font.render(str, True, (255, 255, 255), (255,40,40))
+    textRect = text.get_rect()
+    textRect.centerx = screen.get_rect().centerx
+    textRect.centery = screen.get_rect().centery+40
+
     screen.blit(text, textRect)
     pygame.display.update()
 
@@ -205,27 +360,42 @@ def display3(x,y,str,r,g,b):
 
     
 def downevent(key,st,elapsed_st):    # key press
-    display2("event key"+st,190,66,66)
+    global lasttime
+    showEvent("Macro:"+st)
+    drawKeys(screen,200,210,key)
     key_state=1
     f.write (("%s " % (elapsed_st))+(command % (st)+"\n"))
     f.write (("%s " % (elapsed_st))+(command % (st+"2")+"\n"))
+    lasttime=time.time()
     return
 
 def upevent(key,st,elapsed_st):                   # key release
-    display2("                         ",66,66,66)
+    global lasttime
+    showEvent("")
+#    display2("                         ",66,66,66)
     key_state=0
     f.write (("%s " % (elapsed_st))+(command % (st)+"\n"))
     f.write (("%s " % (elapsed_st))+(command % (st+"_2")+"\n"))
+    lasttime=time.time()
+    return
+
+def dothing(elapsed_st,amount):       # used for mouse wheel phase shift
+    global lasttime
+
+    key_state=0
+    f.write ("%s $(thing) %s\n" % (elapsed_st,amount))
+    lasttime=time.time()
     return
 
 # set up graphics
 
 pygame.init()
-screen = pygame.display.set_mode( (640,480) )
+screen = pygame.display.set_mode( (500,500) )
 pygame.display.set_caption('Stroke Recorder')
 screen.fill((66,66,66))
 
-font = pygame.font.Font(None, 24)
+font = pygame.font.Font(None, 20)
+font2 = pygame.font.Font(None, 15)
 
 start=time.time()
 
@@ -241,27 +411,47 @@ pygame.key.set_repeat()
 
 while not done:
   for event in pygame.event.get():
-    display2("HIT A KEY TO RECORD",66,190,66)
+    showEvent("HIT A KEY TO START")
 
     if (event.type==pygame.KEYDOWN):
        start=time.time()
-       display2("                                          ",66,66,66)
        done=True
-       
+
+showEvent("5")
+time.sleep(1)
+showEvent("4")
+time.sleep(1)
+showEvent("3")
+time.sleep(1)
+showEvent("2")
+time.sleep(1)
+showEvent("1")
+time.sleep(1)
+showEvent("GO")
+
 
 done=False
 
+updatePhase()
+drawKeys(screen,200,210,None)
+
 # main loop
 
+lasttime=start
 while not done:
+    drawKeys(screen,200,210,None)
+
     now=time.time()
+    difftime=(now-lasttime)
     elapsed=(now-start)
-    
-    elapsed_st="{:.1f}".format(elapsed)
-    display( "     "+elapsed_st+"     " )
+      
+    elapsed_st="{:.2f}".format(elapsed)
+#    display( "     "+elapsed_st+"     " )
+    updateTime(elapsed_st)
     num += 1
 
     for event in pygame.event.get():
+
       if (event.type==pygame.KEYDOWN):
         if event.key==K_KP0:
             downevent(K_KP0,"0",elapsed_st)
@@ -295,14 +485,14 @@ while not done:
             downevent(K_KP_ENTER,"_ENTER",elapsed_st)
         elif event.key==K_KP_DIVIDE:
             downevent(K_KP_DIVIDE,"_DIVIDE",elapsed_st)
-          
+
         elif event.key==K_ESCAPE:
           done = True
           break
         elif event.key==K_q:
           done = True
           break
-
+      
       elif (event.type==pygame.KEYUP):
         if event.key==K_KP0:
             upevent(K_KP0,"0R",elapsed_st)
@@ -337,8 +527,37 @@ while not done:
         elif event.key==K_KP_DIVIDE:
             upevent(K_KP_DIVIDE,"_DIVIDE",elapsed_st)
 
-      time.sleep(.05)
 
+
+      elif event.type==MOUSEBUTTONDOWN:
+          
+        if (event.button==5):     # scroll wheel down
+          phase-=.05
+          phase=round(phase,2)
+          if (phase<-.5):
+            phase=-.5
+          dothing(elapsed_st,str(phase))
+          #print ("phase down: %1.2f" % (phase))
+          updatePhase()
+
+          
+        elif (event.button==4):   # scroll wheel up
+          phase+=.05
+          phase=round(phase,2)
+          if (phase>.5):
+            phase=.5
+          dothing(elapsed_st,phase)
+          #print ("phase up: %1.2f" % (phase))
+          updatePhase()
+
+          
+
+    if (difftime>10):
+      phase=0
+      dothing(elapsed_st,str(0)+" slow")
+      updatePhase()
+      
+                       
 f.write (("length %s" % (elapsed_st)+"\n"))
 
 f.write('''
