@@ -40,7 +40,7 @@ import numpy as np
 from notes import *
 import copy
 import json
-
+import random
 
 #print (sys.version)
 
@@ -81,6 +81,8 @@ waves={}          # a hash of waveforms
 lfos={}           # a hash of Low Frequency Oscilator signals
 macros={}         # hash of multi-line macros
 swaps={}          # hash of short symbol swaps
+sc_enable=0       # soft clip enable when zero
+sc_pct=1.         # soft clip chance percent
 
 def clipWarning (x,str):
   global clips
@@ -1288,6 +1290,56 @@ def doBalance (words):
     if (chb<.5):
       balanceR=1
       balanceL=chb*2.
+
+#----------------------------------------------------------------------
+
+def softclip (value, limit, percent, x):
+  # value is +32767/-32768
+  # limit is 0-1
+  # percent is 0-1
+  
+  global sc_enable
+  global sc_pct
+
+  slimit=int(maxint*limit)
+  
+  newvalue=value
+  
+  print ("status %d %d %f %f" % (sc_enable,value,limit,percent))
+  if (sc_enable==0):         # ready to trigger?
+    if ((value>slimit) or (value<-slimit)):
+      roll=random.random()      # roll a random number
+      if (roll<sc_pct):         # trigger?
+        sc_enable=1             # yes
+        print ("triggering softclip %d %f %f" % (value,limit,percent))
+      else:
+        sc_enable=2             # no, not until cleared
+        print ("SKIPPING softclip %d %f %f" % (value,limit,percent))
+    else:
+        print ("no action %d %f %f" % (value,limit,percent))
+
+
+
+  if (sc_enable==1):         # enabled? 
+    if (value>slimit):        # clip at high?
+      newvalue=slimit
+      #print ("clipping high %f " % (slimit))
+    elif (value<-slimit):     # clip at low?
+      newvalue=-slimit
+      #print ("clipping low %f " % (-slimit))
+    else:
+      print ("retrigger from state 1 %d %f %f" % (value,limit,percent))
+      newvalue=value         # no clip
+      sc_enable=0           # ready to trigger again
+
+
+  elif ((sc_enable==2) and (value<slimit) and (value>-slimit)):
+    print ("retrigger from state 2 %d %f %f" % (value,limit,percent))
+    sc_enable=0            # ready to trigger again
+
+      
+  return newvalue
+
 #--------------------------------------------------
 
 def doCommand (line):
@@ -1303,6 +1355,7 @@ def doCommand (line):
     global id3author
     global id3comment
     global id3title
+    global sc_pct
 
     # do swaps for things that look like this:  $(thing)
     # yes, this is painful but regex in Python is badly implemented
@@ -1727,34 +1780,40 @@ def doCommand (line):
           elif (command=="softclip"):                       # SOFTCLIP ----------
             handleTimeRange(subcmd[0],line,1)
 
-            strength=float(lookFor(words,"strength",True,1.5))
-            voladj=float(lookFor(words,"voladj",True,1.4))
+            cliplevel=float(lookFor(words,"limit",True,.9))
+            clipchance=lookFor(words,"percent",True,"1.")
+            clippct=clipchance.split("-")
+            sc_enable=0
+
+            if (len(clippct)>=2):
+              clippct1=getFloat(line,clippct[0]," Clip chance needs to be a fraction.")
+              clippct2=getFloat(line,clippct[1]," Clip chance needs to be a fraction.")
+            else:
+              clippct1=getFloat(line,clippct[0]," Clip chance needs to be a fraction.")
+              clippct2=getFloat(line,clippct[0]," Clip chance needs to be a fraction.")
+
+            
             startx=timeToPos(ct)
             endx=timeToPos(et)
 
-            # tested the formula here using excel. increasing
-            # strength will distort the signal more. Some loss
-            # of volume will occur so voladj will compensate, however,
-            # too large voladj will drive back towards hard clipping
-            #
-            # Have to normalize signal down to +1:-1 then scale back to maxint
+            # this is reworked based on the waves observed in the finale
+            # of Lily Ivy estim
               
             if (progress):  print ("STATUS: doing softclipping at "+str(ct))
 
             if (balanceL>0):
               for x in range(startx,endx):
-                val=2/math.pi*math.atan(strength*signal1.data[x]/maxint)*voladj
- #               debug.write("L clip before: %.4f  after %.4f \n" % (signal1.data[x],val))
-                signal1.data[x]=int(val*maxint)
+                curpct=(float(x)-startx)/(endx-startx)*(clippct2-clippct1)+clippct1
+                val=softclip(signal1.data[x],cliplevel,curpct,x)
+                signal1.data[x]=val
                  
             # do right
               
             if (balanceR>0):
               for x in range(startx,endx):
-                val=2/math.pi*math.atan(strength*signal2.data[x]/maxint)*voladj
-#                debug.write("R clip before: %.4f  after %.4f \n" % (signal2.data[x],val))
-                signal2.data[x]=int(val*maxint)
-
+                curpct=(float(x)-startx)/(endx-startx)*(clippct2-clippct1)+clippct1
+                val=softclip(signal2.data[x],cliplevel,curpct,x)
+                signal2.data[x]=val
                  
           elif (command=="compress"):                       # COMPRESS ----------
             handleTimeRange(subcmd[0],line,1)
@@ -2208,11 +2267,16 @@ def doCommand (line):
          sample.loadWave(st,en)
          newwave.addSample(sample)
 
+      elif (command=="stop"):   # for debugging .e files - stops reading commands
+         print ("\x1b[31mDEBUG: Exiting on stop command in .e file\x1b[0m");
+         return True
+
+         
       elif (command!=''):
          print ("\x1b[33mWARNING: Unrecognized command: '%s'\x1b[0m" % (command))
 
          # blank lines and uncrecognized commands fall through here
-    return
+    return False
 
 
 #============================================================
@@ -2286,7 +2350,10 @@ while line:
   # remove everything after a # as a comment
 
   line=line[0].split('#')
-  doCommand(line[0])
+  stop=doCommand(line[0])
+  if (stop):
+    f.close()
+    break
 
   if (not dontread):     # skip if we just read a macro or processing one
     line=f.readline()    # pull in the next line and loop

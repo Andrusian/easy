@@ -159,13 +159,16 @@ thing=modify BASER phase
 
 
 event9=modify BASER phase .5 slow
-event9R=modify 
+event9R=noop
 event6=modify BASER phase .3 slow
 event6R=noop
 event3=modify BASER phase -.3 slow
 event3R=noop
-eventP=modify BASER phase -.5 slow
-eventPR=noop
+event_P=modify BASER phase -.5 slow
+event_P2=noop
+event_PR=noop
+event_PR_2=noop
+
 
 event_ENT=modify BASER vol .1
 event_ENT_2=modify BASEL vol .1
@@ -397,8 +400,6 @@ screen.fill((66,66,66))
 font = pygame.font.Font(None, 20)
 font2 = pygame.font.Font(None, 15)
 
-start=time.time()
-
 num = 0
 done = False
 key_state = 0    # current key status is none down
@@ -429,6 +430,7 @@ showEvent("1")
 time.sleep(1)
 showEvent("GO")
 
+start=time.time()
 
 done=False
 
