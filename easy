@@ -1299,45 +1299,52 @@ def softclip (value, limit, percent, x):
   # percent is 0-1
   
   global sc_enable
-  global sc_pct
 
   slimit=int(maxint*limit)
   
-  newvalue=value
+  newvalue=value        # fallback is current value
   
-  print ("status %d %d %f %f" % (sc_enable,value,limit,percent))
-  if (sc_enable==0):         # ready to trigger?
-    if ((value>slimit) or (value<-slimit)):
-      roll=random.random()      # roll a random number
-      if (roll<sc_pct):         # trigger?
-        sc_enable=1             # yes
-        print ("triggering softclip %d %f %f" % (value,limit,percent))
+  # handle the clipping logic...
+
+
+  if (sc_enable==0):                           # ready to trigger?
+    if ((value>slimit) or (value<-slimit)):    # did we hit limit?
+      roll=random.random()                     # roll a random number
+      if (roll<percent):                        # trigger?
+        sc_enable=1                            # yes - set the triggered state
+        #print ("triggering softclip %d %f %f roll %f pct %f ---- " % (value,limit,percent,roll,percent))
       else:
-        sc_enable=2             # no, not until cleared
-        print ("SKIPPING softclip %d %f %f" % (value,limit,percent))
+        sc_enable=2                            # no - no, skip this peak
+        #print ("SKIPPING softclip %d %f %f roll %f pct %f" % (value,limit,percent,roll,percent))
     else:
-        print ("no action %d %f %f" % (value,limit,percent))
+      pass
+      #print ("no action %d %f %f" % (value,limit,percent))
 
+  # handled triggered state
 
-
-  if (sc_enable==1):         # enabled? 
-    if (value>slimit):        # clip at high?
+  if (sc_enable==1):         # tiggered ? 
+    if (value>slimit):        # over high limit?
       newvalue=slimit
+      #print ("clip high at %d " % (newvalue))
       #print ("clipping high %f " % (slimit))
-    elif (value<-slimit):     # clip at low?
+    elif (value<-slimit):     # under low limit?
       newvalue=-slimit
+      #print ("clip low at %d " % (newvalue))
       #print ("clipping low %f " % (-slimit))
     else:
-      print ("retrigger from state 1 %d %f %f" % (value,limit,percent))
+      #print ("return from state 1 %d %f %f" % (value,limit,percent))
       newvalue=value         # no clip
+      #print ("end clip at %d ----------------------------- " % (newvalue))
       sc_enable=0           # ready to trigger again
 
+  # handle skipped state 
 
-  elif ((sc_enable==2) and (value<slimit) and (value>-slimit)):
-    print ("retrigger from state 2 %d %f %f" % (value,limit,percent))
+  if ((sc_enable==2) and (value<slimit) and (value>-slimit)):
+    #print ("return from state 2 %d %f %f" % (value,limit,percent))
     sc_enable=0            # ready to trigger again
 
-      
+  #print ("fstatus %d %d %d %f" % (sc_enable,newvalue,slimit,percent))
+
   return newvalue
 
 #--------------------------------------------------
@@ -1780,10 +1787,13 @@ def doCommand (line):
           elif (command=="softclip"):                       # SOFTCLIP ----------
             handleTimeRange(subcmd[0],line,1)
 
-            cliplevel=float(lookFor(words,"limit",True,.9))
+            cliplevel=lookFor(words,"limit",True,".9")
             clipchance=lookFor(words,"percent",True,"1.")
             clippct=clipchance.split("-")
+            cliplim=cliplevel.split("-")
             sc_enable=0
+
+            # handle sliding percentage
 
             if (len(clippct)>=2):
               clippct1=getFloat(line,clippct[0]," Clip chance needs to be a fraction.")
@@ -1792,19 +1802,29 @@ def doCommand (line):
               clippct1=getFloat(line,clippct[0]," Clip chance needs to be a fraction.")
               clippct2=getFloat(line,clippct[0]," Clip chance needs to be a fraction.")
 
+            # handle sliding limit
+
+            if (len(cliplim)>=2):
+              cliplim1=getFloat(line,cliplim[0]," Clip chance needs to be a fraction.")
+              cliplim2=getFloat(line,cliplim[1]," Clip chance needs to be a fraction.")
+            else:
+              cliplim1=getFloat(line,cliplim[0]," Clip chance needs to be a fraction.")
+              cliplim2=getFloat(line,cliplim[0]," Clip chance needs to be a fraction.")
             
             startx=timeToPos(ct)
             endx=timeToPos(et)
 
             # this is reworked based on the waves observed in the finale
             # of Lily Ivy estim
-              
+
             if (progress):  print ("STATUS: doing softclipping at "+str(ct))
 
             if (balanceL>0):
               for x in range(startx,endx):
                 curpct=(float(x)-startx)/(endx-startx)*(clippct2-clippct1)+clippct1
-                val=softclip(signal1.data[x],cliplevel,curpct,x)
+                curlim=(float(x)-startx)/(endx-startx)*(cliplim2-cliplim1)+cliplim1
+                #print ("clippct in effect %f %f " % (curpct,curlim))
+                val=softclip(signal1.data[x],curlim,curpct,x)
                 signal1.data[x]=val
                  
             # do right
@@ -1812,7 +1832,8 @@ def doCommand (line):
             if (balanceR>0):
               for x in range(startx,endx):
                 curpct=(float(x)-startx)/(endx-startx)*(clippct2-clippct1)+clippct1
-                val=softclip(signal2.data[x],cliplevel,curpct,x)
+                curlim=(float(x)-startx)/(endx-startx)*(cliplim2-cliplim1)+cliplim1
+                val=softclip(signal2.data[x],curlim,curpct,x)
                 signal2.data[x]=val
                  
           elif (command=="compress"):                       # COMPRESS ----------
